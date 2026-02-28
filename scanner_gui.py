@@ -30,6 +30,34 @@ TARGET_EXTENSIONS: set[str] = {
     ".txt",
 }
 
+_HELP_TEXTS: dict[str, str] = {
+    "파일/문서": (
+        "■ 파일/문서 검색\n\n"
+        "1. 검색 대상: 드라이브 또는 폴더를 선택합니다\n"
+        "2. 키워드 관리: 검색할 키워드를 추가/삭제합니다\n"
+        "3. 검색 범위:\n"
+        "   - 파일명: 파일 이름에서만 키워드 검색\n"
+        "   - 문서(내용): 문서 내부 텍스트에서 키워드 검색\n"
+        "4. 지원 확장자: pdf, xlsx, xls, docx, doc, hwp, hwpx, csv, txt\n\n"
+        "■ 검색 결과\n"
+        "- 키워드/확장자 헤더 클릭: 필터링\n"
+        "- 파일명 더블클릭: 파일 열기\n"
+        "- 파일경로 더블클릭: 폴더 열기\n"
+        "- 우클릭: 파일열기/경로열기/경로복사\n\n"
+        "■ 화면 조작\n"
+        "- 좌측/우측 패널 경계선 드래그: 패널 크기 조절"
+    ),
+    "개인정보": (
+        "■ 개인정보 검색 (준비 중)\n\n"
+        "주민번호, 휴대폰, 카드번호, 운전면허, 여권번호\n"
+        "5개 패턴을 자동 검출합니다."
+    ),
+    "불법S/W파일": (
+        "■ 불법S/W파일 검색 (준비 중)\n\n"
+        "불법 소프트웨어 관련 파일을 탐지합니다."
+    ),
+}
+
 
 class FileScannerApp(ctk.CTk):
     """키워드 기반 문서 검색 GUI를 제공하는 메인 윈도우."""
@@ -62,9 +90,10 @@ class FileScannerApp(ctk.CTk):
         self._path_values: dict[str, str] = {}
         self._search_mode = tk.StringVar(value="content")
 
-        self._font = ctk.CTkFont(family="맑은 고딕", size=13)
+        self._font = ctk.CTkFont(family="맑은 고딕", size=14, weight="bold")
         self._title_font = ctk.CTkFont(family="맑은 고딕", size=15, weight="bold")
         self._summary_font = ctk.CTkFont(family="맑은 고딕", size=13)
+        self._drive_font = ctk.CTkFont(family="맑은 고딕", size=15, weight="bold")
 
         self._build_ui()
         self._load_system_drives()
@@ -72,18 +101,21 @@ class FileScannerApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
+        self.configure(fg_color="#f0f2f5")
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=0)
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        tab_bar = ctk.CTkFrame(self, fg_color="#141720", corner_radius=0, height=52)
+        # ── 상단 탭 바 ──
+        tab_bar = ctk.CTkFrame(self, fg_color="#ffffff", corner_radius=0, height=50)
         tab_bar.grid(row=0, column=0, sticky="ew")
         tab_bar.grid_propagate(False)
-        tab_bar.grid_columnconfigure(0, weight=0)
+        tab_bar.grid_columnconfigure(0, weight=1)
         tab_bar.grid_columnconfigure(1, weight=0)
         tab_bar.grid_columnconfigure(2, weight=0)
-        tab_bar.grid_columnconfigure(3, weight=1)
+        tab_bar.grid_columnconfigure(3, weight=0)
+        tab_bar.grid_columnconfigure(4, weight=1)
 
         self._tab_buttons: dict[str, ctk.CTkButton] = {}
         self._tab_frames: dict[str, ctk.CTkFrame] = {}
@@ -94,36 +126,52 @@ class FileScannerApp(ctk.CTk):
             btn = ctk.CTkButton(
                 tab_bar,
                 text=name,
-                font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+                font=ctk.CTkFont(family="맑은 고딕", size=17, weight="bold"),
                 fg_color="transparent",
-                hover_color="#252a36",
-                text_color="#6b7280",
-                corner_radius=0,
-                height=52,
-                width=180,
+                hover_color="#e8eaed",
+                text_color="#5f6368",
+                corner_radius=8,
+                height=50,
+                width=160,
                 anchor="center",
                 command=lambda n=name: self._switch_tab(n),
             )
-            btn.grid(row=0, column=col, sticky="ns", padx=(0, 0))
+            btn.grid(row=0, column=col + 1, sticky="ns")
             self._tab_buttons[name] = btn
 
-        separator = ctk.CTkFrame(self, fg_color="#2f343b", height=2, corner_radius=0)
+        help_btn = ctk.CTkButton(
+            tab_bar,
+            text="?",
+            width=40,
+            height=36,
+            font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+            fg_color="#e5e7eb",
+            hover_color="#d1d5db",
+            text_color="#374151",
+            corner_radius=8,
+            command=self._show_help,
+        )
+        help_btn.grid(row=0, column=4, padx=(0, 16), sticky="e")
+
+        # 구분선
+        separator = ctk.CTkFrame(self, fg_color="#e5e7eb", height=1, corner_radius=0)
         separator.grid(row=1, column=0, sticky="ew")
 
-        content_area = ctk.CTkFrame(self, fg_color="transparent")
-        content_area.grid(row=2, column=0, padx=12, pady=(8, 12), sticky="nsew")
+        # ── 콘텐츠 영역 ──
+        content_area = ctk.CTkFrame(self, fg_color="#f0f2f5", corner_radius=0)
+        content_area.grid(row=2, column=0, padx=16, pady=(12, 16), sticky="nsew")
         content_area.grid_rowconfigure(0, weight=1)
         content_area.grid_columnconfigure(0, weight=1)
 
-        tab1 = ctk.CTkFrame(content_area, fg_color="transparent")
+        tab1 = ctk.CTkFrame(content_area, fg_color="#f0f2f5", corner_radius=0)
         self._tab_frames["파일/문서"] = tab1
         self._build_keyword_tab(tab1)
 
-        tab2 = ctk.CTkFrame(content_area, fg_color="transparent")
+        tab2 = ctk.CTkFrame(content_area, fg_color="#f0f2f5", corner_radius=0)
         self._tab_frames["개인정보"] = tab2
         self._build_placeholder_tab(tab2)
 
-        tab3 = ctk.CTkFrame(content_area, fg_color="transparent")
+        tab3 = ctk.CTkFrame(content_area, fg_color="#f0f2f5", corner_radius=0)
         self._tab_frames["불법S/W파일"] = tab3
         self._build_placeholder_tab(tab3)
 
@@ -131,6 +179,10 @@ class FileScannerApp(ctk.CTk):
 
     def _switch_tab(self, name: str) -> None:
         if name == self._current_tab:
+            return
+
+        if self._is_searching:
+            messagebox.showwarning("경고", "검색 중에는 탭을 전환할 수 없습니다.")
             return
 
         for frame in self._tab_frames.values():
@@ -141,18 +193,22 @@ class FileScannerApp(ctk.CTk):
         for btn_name, btn in self._tab_buttons.items():
             if btn_name == name:
                 btn.configure(
-                    fg_color="#1f6aa5",
-                    text_color="#ffffff",
-                    hover_color="#2980b9",
+                    fg_color="#e0edff",
+                    text_color="#1a56db",
+                    hover_color="#d0e3ff",
                 )
             else:
                 btn.configure(
                     fg_color="transparent",
-                    text_color="#6b7280",
-                    hover_color="#252a36",
+                    text_color="#5f6368",
+                    hover_color="#e8eaed",
                 )
 
         self._current_tab = name
+
+    def _show_help(self) -> None:
+        text = _HELP_TEXTS.get(self._current_tab, "도움말이 없습니다.")
+        messagebox.showinfo(f"도움말 - {self._current_tab}", text)
 
     def _build_placeholder_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_rowconfigure(0, weight=1)
@@ -161,25 +217,35 @@ class FileScannerApp(ctk.CTk):
             tab,
             text="준비 중",
             font=ctk.CTkFont(family="맑은 고딕", size=20),
-            text_color="#6b7280",
+            text_color="#9ca3af",
         )
         label.grid(row=0, column=0, sticky="nsew")
 
     def _build_keyword_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_rowconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=0)
-        tab.grid_columnconfigure(0, weight=0)
-        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
 
-        left_panel = ctk.CTkFrame(tab, width=300)
-        left_panel.grid(row=0, column=0, padx=(0, 10), pady=(12, 10), sticky="nsew")
+        paned = tk.PanedWindow(
+            tab,
+            orient=tk.HORIZONTAL,
+            sashwidth=6,
+            sashrelief="flat",
+            bg="#e5e7eb",
+            opaqueresize=True,
+        )
+        paned.grid(row=0, column=0, sticky="nsew")
+
+        left_panel = ctk.CTkFrame(paned, width=320, fg_color="#ffffff", corner_radius=8)
         left_panel.grid_propagate(False)
 
-        right_panel = ctk.CTkFrame(tab)
-        right_panel.grid(row=0, column=1, padx=(0, 0), pady=(12, 10), sticky="nsew")
+        right_panel = ctk.CTkFrame(paned, fg_color="#ffffff", corner_radius=8)
 
-        bottom_bar = ctk.CTkFrame(tab)
-        bottom_bar.grid(row=1, column=0, columnspan=2, sticky="sew")
+        paned.add(left_panel, minsize=280, stretch="never")
+        paned.add(right_panel, minsize=400, stretch="always")
+
+        bottom_bar = ctk.CTkFrame(tab, fg_color="#ffffff", corner_radius=8)
+        bottom_bar.grid(row=1, column=0, pady=(10, 0), sticky="sew")
 
         self._build_left_panel(left_panel)
         self._build_right_panel(right_panel)
@@ -188,29 +254,44 @@ class FileScannerApp(ctk.CTk):
     def _build_left_panel(self, panel: ctk.CTkFrame) -> None:
         panel.grid_columnconfigure(0, weight=1)
 
-        title = ctk.CTkLabel(panel, text="검색 대상", font=self._title_font, anchor="w")
-        title.grid(row=0, column=0, padx=10, pady=(10, 8), sticky="ew")
+        title = ctk.CTkLabel(
+            panel, text="검색 대상", font=self._title_font,
+            anchor="w", text_color="#1f2937",
+        )
+        title.grid(row=0, column=0, padx=12, pady=(12, 8), sticky="ew")
 
-        self.path_frame = ctk.CTkScrollableFrame(panel, width=280, height=180)
-        self.path_frame.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="ew")
+        self.path_frame = ctk.CTkScrollableFrame(
+            panel, width=296, height=170,
+            fg_color="#f9fafb", corner_radius=6,
+            scrollbar_button_color="#d1d5db",
+            scrollbar_button_hover_color="#9ca3af",
+        )
+        self.path_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
 
         self.add_folder_button = ctk.CTkButton(
-            panel,
-            text="폴더 추가",
-            command=self._on_add_folder,
-            font=self._font,
+            panel, text="폴더 추가", command=self._on_add_folder,
+            font=self._font, height=32,
+            fg_color="#1a56db", hover_color="#1648c0", text_color="#ffffff",
+            corner_radius=6,
         )
-        self.add_folder_button.grid(row=2, column=0, padx=10, pady=(0, 16), sticky="ew")
+        self.add_folder_button.grid(row=2, column=0, padx=12, pady=(0, 14), sticky="ew")
 
-        keyword_title = ctk.CTkLabel(panel, text="키워드 관리", font=self._title_font, anchor="w")
-        keyword_title.grid(row=3, column=0, padx=10, pady=(0, 8), sticky="ew")
+        keyword_title = ctk.CTkLabel(
+            panel, text="키워드 관리", font=self._title_font,
+            anchor="w", text_color="#1f2937",
+        )
+        keyword_title.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
 
-        self.keyword_entry = ctk.CTkEntry(panel, font=self._font, placeholder_text="키워드 입력")
-        self.keyword_entry.grid(row=4, column=0, padx=10, pady=(0, 8), sticky="ew")
+        self.keyword_entry = ctk.CTkEntry(
+            panel, font=self._font, placeholder_text="키워드 입력",
+            fg_color="#f9fafb", border_color="#d1d5db", text_color="#1f2937",
+            placeholder_text_color="#9ca3af", corner_radius=6, height=32,
+        )
+        self.keyword_entry.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
         self.keyword_entry.bind("<Return>", self._on_add_keyword)
 
-        list_container = ctk.CTkFrame(panel)
-        list_container.grid(row=5, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        list_container = ctk.CTkFrame(panel, fg_color="#f9fafb", corner_radius=6)
+        list_container.grid(row=5, column=0, padx=12, pady=(0, 8), sticky="nsew")
         panel.grid_rowconfigure(5, weight=1)
         list_container.grid_rowconfigure(0, weight=1)
         list_container.grid_columnconfigure(0, weight=1)
@@ -219,15 +300,15 @@ class FileScannerApp(ctk.CTk):
             list_container,
             selectmode=tk.EXTENDED,
             exportselection=False,
-            font=("맑은 고딕", 13),
+            font=("맑은 고딕", 13, "bold"),
             activestyle="none",
             height=10,
-            bg="#121212",
-            fg="#f5f7fa",
-            selectbackground="#1f6aa5",
+            bg="#f9fafb",
+            fg="#1f2937",
+            selectbackground="#1a56db",
             selectforeground="#ffffff",
             highlightthickness=1,
-            highlightbackground="#3a3f46",
+            highlightbackground="#d1d5db",
             borderwidth=0,
             relief="flat",
         )
@@ -238,42 +319,57 @@ class FileScannerApp(ctk.CTk):
         self.keyword_listbox.config(yscrollcommand=keyword_scroll.set)
 
         button_row = ctk.CTkFrame(panel, fg_color="transparent")
-        button_row.grid(row=6, column=0, padx=10, pady=(0, 10), sticky="ew")
+        button_row.grid(row=6, column=0, padx=12, pady=(0, 10), sticky="ew")
         for col in range(3):
             button_row.grid_columnconfigure(col, weight=1)
 
-        add_button = ctk.CTkButton(button_row, text="추가", command=self._on_add_keyword, font=self._font)
+        add_button = ctk.CTkButton(
+            button_row, text="추가", command=self._on_add_keyword,
+            font=self._font, height=30, corner_radius=6,
+            fg_color="#1a56db", hover_color="#1648c0", text_color="#ffffff",
+        )
         add_button.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
-        remove_button = ctk.CTkButton(button_row, text="선택삭제", command=self._on_remove_keyword, font=self._font)
+        remove_button = ctk.CTkButton(
+            button_row, text="선택삭제", command=self._on_remove_keyword,
+            font=self._font, height=30, corner_radius=6,
+            fg_color="#e5e7eb", hover_color="#d1d5db", text_color="#374151",
+        )
         remove_button.grid(row=0, column=1, padx=4, sticky="ew")
 
-        save_button = ctk.CTkButton(button_row, text="전체삭제", command=self._on_save_keywords, font=self._font)
+        save_button = ctk.CTkButton(
+            button_row, text="전체삭제", command=self._on_save_keywords,
+            font=self._font, height=30, corner_radius=6,
+            fg_color="#e5e7eb", hover_color="#d1d5db", text_color="#374151",
+        )
         save_button.grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
-        search_mode_title = ctk.CTkLabel(panel, text="검색 범위", font=self._font, anchor="w")
-        search_mode_title.grid(row=7, column=0, padx=10, pady=(0, 6), sticky="ew")
+        search_mode_title = ctk.CTkLabel(
+            panel, text="검색 범위", font=self._font,
+            anchor="w", text_color="#1f2937",
+        )
+        search_mode_title.grid(row=7, column=0, padx=12, pady=(0, 6), sticky="ew")
 
         search_mode_row = ctk.CTkFrame(panel, fg_color="transparent")
-        search_mode_row.grid(row=8, column=0, padx=10, pady=(0, 10), sticky="ew")
+        search_mode_row.grid(row=8, column=0, padx=12, pady=(0, 12), sticky="ew")
         search_mode_row.grid_columnconfigure(0, weight=1)
         search_mode_row.grid_columnconfigure(1, weight=1)
 
         filename_radio = ctk.CTkRadioButton(
-            search_mode_row,
-            text="파일명",
-            variable=self._search_mode,
-            value="filename",
-            font=self._font,
+            search_mode_row, text="파일명",
+            variable=self._search_mode, value="filename",
+            font=self._font, text_color="#374151",
+            fg_color="#1a56db", hover_color="#d0e3ff",
+            border_color="#9ca3af",
         )
         filename_radio.grid(row=0, column=0, padx=(0, 8), sticky="w")
 
         content_radio = ctk.CTkRadioButton(
-            search_mode_row,
-            text="문서(내용)",
-            variable=self._search_mode,
-            value="content",
-            font=self._font,
+            search_mode_row, text="문서(내용)",
+            variable=self._search_mode, value="content",
+            font=self._font, text_color="#374151",
+            fg_color="#1a56db", hover_color="#d0e3ff",
+            border_color="#9ca3af",
         )
         content_radio.grid(row=0, column=1, sticky="w")
 
@@ -282,11 +378,14 @@ class FileScannerApp(ctk.CTk):
         panel.grid_rowconfigure(2, weight=0)
         panel.grid_columnconfigure(0, weight=1)
 
-        title = ctk.CTkLabel(panel, text="검색 결과", font=self._title_font, anchor="w")
-        title.grid(row=0, column=0, padx=10, pady=(10, 8), sticky="ew")
+        title = ctk.CTkLabel(
+            panel, text="검색 결과", font=self._title_font,
+            anchor="w", text_color="#1f2937",
+        )
+        title.grid(row=0, column=0, padx=12, pady=(12, 8), sticky="ew")
 
-        tree_frame = ctk.CTkFrame(panel)
-        tree_frame.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        tree_frame = ctk.CTkFrame(panel, fg_color="#f9fafb", corner_radius=6)
+        tree_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="nsew")
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
         self._configure_treeview_style()
@@ -315,19 +414,11 @@ class FileScannerApp(ctk.CTk):
         self.result_tree.column("location", width=80, minwidth=80, anchor="w", stretch=False)
         self.result_tree.column("context", width=350, minwidth=220, anchor="w", stretch=True)
         self.result_tree.column("fullpath", width=0, minwidth=0, stretch=False)
-        self.result_tree.tag_configure("fail", foreground="#FF6666")
+        self.result_tree.tag_configure("fail", foreground="#dc2626")
 
-        tree_v_scroll = ttk.Scrollbar(
-            tree_frame,
-            orient="vertical",
-            command=self.result_tree.yview,
-        )
+        tree_v_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.result_tree.yview)
         tree_v_scroll.grid(row=0, column=1, sticky="ns")
-        tree_h_scroll = ttk.Scrollbar(
-            tree_frame,
-            orient="horizontal",
-            command=self.result_tree.xview,
-        )
+        tree_h_scroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.result_tree.xview)
         tree_h_scroll.grid(row=1, column=0, sticky="ew")
         self.result_tree.configure(yscrollcommand=tree_v_scroll.set, xscrollcommand=tree_h_scroll.set)
 
@@ -338,36 +429,41 @@ class FileScannerApp(ctk.CTk):
         self.result_tree.bind("<Double-1>", self._on_tree_double_click)
         self.result_tree.bind("<Button-3>", self._on_tree_right_click)
 
-        self.summary_label = ctk.CTkLabel(panel, text="", font=self._summary_font, anchor="w")
-        self.summary_label.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.summary_label = ctk.CTkLabel(
+            panel, text="", font=self._summary_font,
+            anchor="w", text_color="#6b7280",
+        )
+        self.summary_label.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="ew")
 
     def _build_bottom_bar(self, panel: ctk.CTkFrame) -> None:
         panel.grid_columnconfigure(1, weight=1)
 
-        self.progress_label = ctk.CTkLabel(panel, text="진행: 0% (0/0파일)", font=self._font)
-        self.progress_label.grid(row=0, column=0, padx=(10, 8), pady=10, sticky="w")
+        self.progress_label = ctk.CTkLabel(
+            panel, text="진행: 0% (0/0파일)", font=self._font,
+            text_color="#374151",
+        )
+        self.progress_label.grid(row=0, column=0, padx=(12, 8), pady=10, sticky="w")
 
-        self.progress_bar = ctk.CTkProgressBar(panel)
+        self.progress_bar = ctk.CTkProgressBar(
+            panel, fg_color="#e5e7eb", progress_color="#1a56db",
+            corner_radius=4, height=14,
+        )
         self.progress_bar.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="ew")
         self.progress_bar.set(0)
 
         self.search_button = ctk.CTkButton(
-            panel,
-            text="검색 시작",
-            command=self._on_search_toggle,
-            font=self._font,
-            width=110,
+            panel, text="검색 시작", command=self._on_search_toggle,
+            font=self._font, width=110, height=34, corner_radius=6,
+            fg_color="#1a56db", hover_color="#1648c0", text_color="#ffffff",
         )
         self.search_button.grid(row=0, column=2, padx=(0, 8), pady=10)
 
         self.save_report_button = ctk.CTkButton(
-            panel,
-            text="리포트 저장(Excel)",
-            command=self._on_save_report,
-            font=self._font,
-            width=150,
+            panel, text="리포트 저장(Excel)", command=self._on_save_report,
+            font=self._font, width=150, height=34, corner_radius=6,
+            fg_color="#059669", hover_color="#047857", text_color="#ffffff",
         )
-        self.save_report_button.grid(row=0, column=3, padx=(0, 10), pady=10)
+        self.save_report_button.grid(row=0, column=3, padx=(0, 12), pady=10)
 
     def _load_system_drives(self) -> None:
         for letter in string.ascii_uppercase:
@@ -398,12 +494,11 @@ class FileScannerApp(ctk.CTk):
 
         var = ctk.BooleanVar(value=checked)
         checkbox = ctk.CTkCheckBox(
-            self.path_frame,
-            text=normalized_path,
-            variable=var,
-            onvalue=True,
-            offvalue=False,
-            font=self._font,
+            self.path_frame, text=normalized_path,
+            variable=var, onvalue=True, offvalue=False,
+            font=self._drive_font, text_color="#374151",
+            fg_color="#1a56db", hover_color="#d0e3ff",
+            border_color="#9ca3af", checkmark_color="#ffffff",
         )
         checkbox.pack(anchor="w", fill="x", padx=4, pady=2)
 
@@ -529,7 +624,7 @@ class FileScannerApp(ctk.CTk):
                                 "keyword": match.get("keyword", ""),
                                 "file_path": match.get("file", file_path),
                                 "location": match.get("location", ""),
-                                "context": match.get("context", ""),
+                                "context": "",
                                 "searched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             }
                             self._results.append(result)
@@ -723,7 +818,7 @@ class FileScannerApp(ctk.CTk):
             "keyword": str(keyword),
             "filename": filename,
             "extension": extension,
-            "filepath_display": f"📁{folder_path}",
+            "filepath_display": folder_path,
             "location": str(location),
             "context_display": table_context,
             "fullpath": normalized_file_path,
@@ -829,27 +924,19 @@ class FileScannerApp(ctk.CTk):
         popup.withdraw()
         popup.transient(self)
         popup.overrideredirect(True)
-        popup.configure(bg="#2b2b2b")
+        popup.configure(bg="#ffffff")
 
         container = tk.Frame(
-            popup,
-            bg="#2b2b2b",
-            bd=1,
-            relief="solid",
-            highlightthickness=1,
-            highlightbackground="#555555",
+            popup, bg="#ffffff", bd=0, relief="flat",
+            highlightthickness=1, highlightbackground="#d1d5db",
         )
         container.pack(fill="both", expand=True)
 
         title_label = tk.Label(
-            container,
-            text=f"{title} 필터",
-            bg="#2b2b2b",
-            fg="#ffffff",
+            container, text=f"{title} 필터",
+            bg="#ffffff", fg="#1f2937",
             font=("맑은 고딕", 12, "bold"),
-            anchor="w",
-            padx=8,
-            pady=6,
+            anchor="w", padx=10, pady=8,
         )
         title_label.pack(fill="x")
 
@@ -878,21 +965,14 @@ class FileScannerApp(ctk.CTk):
             apply_selection()
 
         all_checkbox = tk.Checkbutton(
-            container,
-            text="전체",
-            variable=all_var,
+            container, text="전체", variable=all_var,
             command=on_toggle_all,
-            bg="#2b2b2b",
-            fg="#ffffff",
+            bg="#ffffff", fg="#1f2937",
             font=("맑은 고딕", 12),
-            selectcolor="#1f1f1f",
-            activebackground="#2b2b2b",
-            activeforeground="#ffffff",
-            anchor="w",
-            padx=8,
-            pady=2,
-            relief="flat",
-            highlightthickness=0,
+            selectcolor="#ffffff",
+            activebackground="#f3f4f6", activeforeground="#1f2937",
+            anchor="w", padx=10, pady=3,
+            relief="flat", highlightthickness=0,
         )
         all_checkbox.pack(fill="x")
 
@@ -903,31 +983,21 @@ class FileScannerApp(ctk.CTk):
                 checkbox = tk.Checkbutton(
                     container,
                     text=self._format_filter_value(target, value),
-                    variable=item_var,
-                    command=on_toggle_item,
-                    bg="#2b2b2b",
-                    fg="#ffffff",
+                    variable=item_var, command=on_toggle_item,
+                    bg="#ffffff", fg="#374151",
                     font=("맑은 고딕", 12),
-                    selectcolor="#1f1f1f",
-                    activebackground="#2b2b2b",
-                    activeforeground="#ffffff",
-                    anchor="w",
-                    padx=20,
-                    pady=2,
-                    relief="flat",
-                    highlightthickness=0,
+                    selectcolor="#ffffff",
+                    activebackground="#f3f4f6", activeforeground="#374151",
+                    anchor="w", padx=22, pady=3,
+                    relief="flat", highlightthickness=0,
                 )
                 checkbox.pack(fill="x")
         else:
             empty_label = tk.Label(
-                container,
-                text="필터 대상이 없습니다",
-                bg="#2b2b2b",
-                fg="#b5b5b5",
+                container, text="필터 대상이 없습니다",
+                bg="#ffffff", fg="#9ca3af",
                 font=("맑은 고딕", 11),
-                anchor="w",
-                padx=8,
-                pady=6,
+                anchor="w", padx=10, pady=8,
             )
             empty_label.pack(fill="x")
             all_checkbox.configure(state="disabled")
@@ -1042,32 +1112,37 @@ class FileScannerApp(ctk.CTk):
             pass
         style.configure(
             "Result.Treeview",
-            background="#101215",
-            foreground="#f3f5f7",
-            fieldbackground="#101215",
-            rowheight=26,
-            font=("맑은 고딕", 12),
-            bordercolor="#2f343b",
-            lightcolor="#2f343b",
-            darkcolor="#2f343b",
+            background="#ffffff",
+            foreground="#1f2937",
+            fieldbackground="#ffffff",
+            rowheight=28,
+            font=("맑은 고딕", 11),
+            bordercolor="#e5e7eb",
+            lightcolor="#e5e7eb",
+            darkcolor="#e5e7eb",
             borderwidth=1,
             relief="solid",
         )
         style.configure(
             "Result.Treeview.Heading",
-            background="#1a1d22",
-            foreground="#f8fafc",
-            font=("맑은 고딕", 13, "bold"),
-            bordercolor="#2f343b",
-            lightcolor="#2f343b",
-            darkcolor="#2f343b",
+            background="#f3f4f6",
+            foreground="#374151",
+            font=("맑은 고딕", 12, "bold"),
+            bordercolor="#d1d5db",
+            lightcolor="#d1d5db",
+            darkcolor="#d1d5db",
             borderwidth=1,
             relief="raised",
         )
         style.map(
             "Result.Treeview",
-            background=[("selected", "#1e5f8f")],
-            foreground=[("selected", "#ffffff")],
+            background=[("selected", "#dbeafe")],
+            foreground=[("selected", "#1e40af")],
+        )
+        style.map(
+            "Result.Treeview.Heading",
+            background=[("active", "#e5e7eb")],
+            foreground=[("active", "#1f2937")],
         )
         style.layout("Result.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
 
@@ -1085,7 +1160,7 @@ class FileScannerApp(ctk.CTk):
 
 def main() -> None:
     """애플리케이션을 실행한다."""
-    ctk.set_appearance_mode("Dark")
+    ctk.set_appearance_mode("Light")
     ctk.set_default_color_theme("blue")
     app = FileScannerApp()
     app.mainloop()
