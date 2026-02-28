@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
 try:
     import fitz  # PyMuPDF
@@ -83,14 +83,18 @@ _SEARCH_FILE_META: dict[str, tuple[bool, bool]] = {}
 _SEARCH_FILE_META_LOCK = threading.Lock()
 
 
-def scan_files(paths: list[str], extensions: set[str]) -> list[str]:
+def scan_files(paths: list[str], extensions: set[str] | None = DEFAULT_EXTENSIONS) -> list[str]:
     """지정 경로를 재귀 탐색해 대상 확장자 파일의 절대경로 목록을 반환한다."""
     if not paths:
         return []
 
-    normalized_extensions = _normalize_extensions(extensions or DEFAULT_EXTENSIONS)
-    if not normalized_extensions:
-        return []
+    normalized_extensions: set[str] | None
+    if extensions is None:
+        normalized_extensions = None
+    else:
+        normalized_extensions = _normalize_extensions(extensions or DEFAULT_EXTENSIONS)
+        if not normalized_extensions:
+            return []
 
     file_paths: set[str] = set()
     visited_dirs: set[str] = set()
@@ -112,7 +116,7 @@ def scan_files(paths: list[str], extensions: set[str]) -> list[str]:
                             walk_dir(entry_path)
                         elif entry.is_file(follow_symlinks=False):
                             _, ext = os.path.splitext(entry.name)
-                            if ext.lower() in normalized_extensions:
+                            if normalized_extensions is None or ext.lower() in normalized_extensions:
                                 file_paths.add(entry_path)
                     except (PermissionError, FileNotFoundError, OSError) as exc:
                         logger.debug("항목 접근 스킵: %s (%s)", entry_path, exc)
@@ -126,7 +130,7 @@ def scan_files(paths: list[str], extensions: set[str]) -> list[str]:
         abs_path = os.path.abspath(raw_path)
         if os.path.isfile(abs_path):
             _, ext = os.path.splitext(abs_path)
-            if ext.lower() in normalized_extensions:
+            if normalized_extensions is None or ext.lower() in normalized_extensions:
                 file_paths.add(abs_path)
             continue
 
@@ -197,30 +201,79 @@ def search_file(filepath: str, keywords: list[str]) -> list[dict[str, str]]:
             skipped = True
             return []
 
-        if not quick_check(filepath, normalized_keywords):
+        results: list[dict[str, str]] = []
+        filename = os.path.basename(filepath)
+        lowered_filename = filename.lower()
+        found_in_filename: set[str] = set()
+
+        # 파일명에서 키워드를 먼저 1건씩 확보하고 본문 검색 대상에서 제외한다.
+        for keyword in normalized_keywords:
+            lowered_keyword = keyword.lower()
+            if lowered_keyword and lowered_keyword in lowered_filename:
+                found_in_filename.add(lowered_keyword)
+                results.append(
+                    {
+                        "keyword": keyword,
+                        "file": filepath,
+                        "location": "파일명",
+                        "context": filename,
+                    }
+                )
+
+        remaining_keywords = [kw for kw in normalized_keywords if kw.lower() not in found_in_filename]
+        if not remaining_keywords:
+            return results
+
+        if not quick_check(filepath, remaining_keywords):
             skipped = True
-            return []
+            return results
 
         text_items, failed = _extract_text_with_status(filepath)
         if failed:
-            return []
+            return results
 
-        matches = search_keywords(text_items, normalized_keywords)
-        return [
-            {
-                "keyword": str(item.get("keyword", "")),
-                "file": filepath,
-                "location": str(item.get("location", "")),
-                "context": str(item.get("context", "")),
-            }
-            for item in matches
-        ]
+        body_matches = search_keywords(text_items, remaining_keywords)
+        for item in body_matches:
+            results.append(
+                {
+                    "keyword": str(item.get("keyword", "")),
+                    "file": filepath,
+                    "location": str(item.get("location", "")),
+                    "context": str(item.get("context", "")),
+                }
+            )
+        return results
     except Exception as exc:
         logger.debug("파일 검색 실패: %s (%s)", filepath, exc)
         failed = True
         return []
     finally:
         _set_search_file_meta(filepath, skipped=skipped, failed=failed)
+
+
+def search_file_by_name(filepath: str, keywords: list[str]) -> list[dict[str, str]]:
+    """파일명에서만 키워드를 검색해 키워드당 최대 1건 결과를 반환한다."""
+    normalized_keywords = _normalize_keyword_list(keywords)
+    if not normalized_keywords:
+        return []
+
+    filename = os.path.basename(filepath)
+    lowered_filename = filename.lower()
+    matches: list[dict[str, str]] = []
+
+    for keyword in normalized_keywords:
+        lowered_keyword = keyword.lower()
+        if lowered_keyword and lowered_keyword in lowered_filename:
+            matches.append(
+                {
+                    "keyword": keyword,
+                    "file": filepath,
+                    "location": "파일명",
+                    "context": filename,
+                }
+            )
+
+    return matches
 
 
 def consume_search_file_meta(filepath: str) -> dict[str, bool]:
@@ -262,27 +315,29 @@ def _extract_text_with_status(filepath: str) -> tuple[list[tuple[str, str]], boo
     return [], False
 
 
-def search_keywords(text_items: list[tuple[str, str]], keywords: list[str]) -> list[dict[str, str]]:
+def search_keywords(text_items: Iterable[tuple[str, str]], keywords: list[str]) -> list[dict[str, str]]:
     """텍스트 목록에서 키워드를 검색해 위치와 문맥 정보를 반환한다."""
     normalized_keywords = _normalize_keyword_list(keywords)
-    if not normalized_keywords or not text_items:
+    if not normalized_keywords:
         return []
 
     results: list[dict[str, str]] = []
+    remaining: dict[str, str] = {keyword.lower(): keyword for keyword in normalized_keywords}
+    iterator = iter(text_items)
 
-    for location, text in text_items:
-        if not text:
-            continue
-        lowered_text = text.lower()
+    try:
+        for location, text in iterator:
+            if not remaining:
+                break
+            if not text:
+                continue
 
-        for keyword in normalized_keywords:
-            lowered_keyword = keyword.lower()
-            start_idx = 0
+            lowered_text = text.lower()
 
-            while True:
-                found_idx = lowered_text.find(lowered_keyword, start_idx)
+            for lowered_keyword, keyword in list(remaining.items()):
+                found_idx = lowered_text.find(lowered_keyword)
                 if found_idx < 0:
-                    break
+                    continue
 
                 context_start = max(0, found_idx - 50)
                 context_end = min(len(text), found_idx + len(keyword) + 50)
@@ -295,7 +350,14 @@ def search_keywords(text_items: list[tuple[str, str]], keywords: list[str]) -> l
                         "context": context,
                     }
                 )
-                start_idx = found_idx + max(1, len(lowered_keyword))
+                remaining.pop(lowered_keyword, None)
+
+            if not remaining:
+                break
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
 
     return results
 
