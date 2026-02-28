@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
@@ -75,6 +76,11 @@ EXCLUDED_DIR_NAMES: set[str] = {
 }
 
 TXT_FALLBACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "mbcs")
+QUICK_CHECK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "utf-16-le")
+QUICK_CHECK_MAX_BYTES = 100 * 1024 * 1024
+
+_SEARCH_FILE_META: dict[str, tuple[bool, bool]] = {}
+_SEARCH_FILE_META_LOCK = threading.Lock()
 
 
 def scan_files(paths: list[str], extensions: set[str]) -> list[str]:
@@ -135,32 +141,125 @@ def scan_files(paths: list[str], extensions: set[str]) -> list[str]:
 
 def extract_text(filepath: str) -> list[tuple[str, str]]:
     """파일 확장자별 텍스트를 추출해 (위치, 텍스트) 목록으로 반환한다."""
+    text_items, _ = _extract_text_with_status(filepath)
+    return text_items
+
+
+def quick_check(filepath: str, keywords: list[str]) -> bool:
+    """바이너리 레벨에서 키워드 포함 여부를 사전 확인한다."""
+    normalized_keywords = _normalize_keyword_list(keywords)
+    if not normalized_keywords:
+        return False
+
+    try:
+        if os.path.getsize(filepath) > QUICK_CHECK_MAX_BYTES:
+            return False
+    except Exception as exc:
+        logger.debug("파일 크기 확인 실패: %s (%s)", filepath, exc)
+        return True
+
+    patterns = _build_quick_check_patterns(normalized_keywords)
+    if not patterns:
+        return False
+
+    max_pattern_len = max(len(pattern) for pattern in patterns)
+    overlap_len = max(0, max_pattern_len - 1)
+
+    try:
+        with open(filepath, "rb") as file:
+            tail = b""
+            while True:
+                chunk = file.read(1024 * 1024)
+                if not chunk:
+                    break
+
+                buffer = tail + chunk
+                for pattern in patterns:
+                    if pattern in buffer:
+                        return True
+
+                tail = buffer[-overlap_len:] if overlap_len > 0 else b""
+    except Exception as exc:
+        logger.debug("빠른 필터링 실패(정밀검사 포함 처리): %s (%s)", filepath, exc)
+        return True
+
+    return False
+
+
+def search_file(filepath: str, keywords: list[str]) -> list[dict[str, str]]:
+    """1단계 quick_check 후 통과 파일만 정밀 추출/검색해 결과를 반환한다."""
+    normalized_keywords = _normalize_keyword_list(keywords)
+    skipped = False
+    failed = False
+
+    try:
+        if not normalized_keywords:
+            skipped = True
+            return []
+
+        if not quick_check(filepath, normalized_keywords):
+            skipped = True
+            return []
+
+        text_items, failed = _extract_text_with_status(filepath)
+        if failed:
+            return []
+
+        matches = search_keywords(text_items, normalized_keywords)
+        return [
+            {
+                "keyword": str(item.get("keyword", "")),
+                "file": filepath,
+                "location": str(item.get("location", "")),
+                "context": str(item.get("context", "")),
+            }
+            for item in matches
+        ]
+    except Exception as exc:
+        logger.debug("파일 검색 실패: %s (%s)", filepath, exc)
+        failed = True
+        return []
+    finally:
+        _set_search_file_meta(filepath, skipped=skipped, failed=failed)
+
+
+def consume_search_file_meta(filepath: str) -> dict[str, bool]:
+    """search_file 실행 메타(스킵/실패)를 반환하고 내부 저장소에서 제거한다."""
+    normalized = os.path.normcase(os.path.abspath(filepath))
+    with _SEARCH_FILE_META_LOCK:
+        skipped, failed = _SEARCH_FILE_META.pop(normalized, (False, False))
+    return {"skipped": skipped, "failed": failed}
+
+
+def _extract_text_with_status(filepath: str) -> tuple[list[tuple[str, str]], bool]:
+    """확장자별 텍스트 추출 결과와 실패 여부를 함께 반환한다."""
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
 
     try:
         if ext == ".pdf":
-            return _extract_pdf(filepath)
+            return _extract_pdf(filepath), False
         if ext == ".xlsx":
-            return _extract_xlsx(filepath)
+            return _extract_xlsx(filepath), False
         if ext == ".xls":
-            return _extract_xls(filepath)
+            return _extract_xls(filepath), False
         if ext == ".docx":
-            return _extract_docx(filepath)
+            return _extract_docx(filepath), False
         if ext == ".doc":
-            return _extract_doc(filepath)
+            return _extract_doc(filepath), False
         if ext == ".hwp":
-            return _extract_hwp(filepath)
+            return _extract_hwp(filepath), False
         if ext == ".hwpx":
-            return _extract_hwpx(filepath)
+            return _extract_hwpx(filepath), False
         if ext == ".csv":
-            return _extract_csv(filepath)
+            return _extract_csv(filepath), False
         if ext == ".txt":
-            return _extract_txt(filepath)
+            return _extract_txt(filepath), False
     except Exception as exc:
-        logger.warning("텍스트 추출 실패: %s (%s)", filepath, exc)
+        logger.debug("텍스트 추출 실패: %s (%s)", filepath, exc)
+        return [], True
 
-    return []
+    return [], False
 
 
 def search_keywords(text_items: list[tuple[str, str]], keywords: list[str]) -> list[dict[str, str]]:
@@ -407,7 +506,7 @@ def _extract_hwp(filepath: str) -> list[tuple[str, str]]:
                 continue
 
             for paragraph_text in _parse_hwp_para_text(content):
-                items.append((f"HWP L{line_no}", paragraph_text))
+                items.append((f"L{line_no}", paragraph_text))
                 line_no += 1
 
         if items:
@@ -419,7 +518,7 @@ def _extract_hwp(filepath: str) -> list[tuple[str, str]]:
             for line in preview.splitlines():
                 cleaned = _clean_text(line)
                 if cleaned:
-                    items.append((f"HWP L{line_no}", cleaned))
+                    items.append((f"L{line_no}", cleaned))
                     line_no += 1
 
     return items
@@ -449,7 +548,7 @@ def _extract_hwpx(filepath: str) -> list[tuple[str, str]]:
             for raw_text in root.itertext():
                 cleaned = _clean_text(raw_text)
                 if cleaned:
-                    items.append((f"HWPX L{line_no}", cleaned))
+                    items.append((f"L{line_no}", cleaned))
                     line_no += 1
 
     return items
@@ -466,7 +565,7 @@ def _extract_csv(filepath: str) -> list[tuple[str, str]]:
                     for col_idx, value in enumerate(row, start=1):
                         cleaned = value.strip()
                         if cleaned:
-                            items.append((f"R{row_idx} C{col_idx}", cleaned))
+                            items.append((f"R{row_idx}C{col_idx}", cleaned))
             return items
         except UnicodeDecodeError:
             items.clear()
@@ -503,6 +602,33 @@ def _normalize_extensions(extensions: set[str]) -> set[str]:
             cleaned = f".{cleaned}"
         normalized.add(cleaned)
     return normalized
+
+
+def _build_quick_check_patterns(keywords: list[str]) -> list[bytes]:
+    patterns: list[bytes] = []
+    seen: set[bytes] = set()
+
+    for keyword in keywords:
+        text_variants = [keyword, keyword.lower(), keyword.upper()]
+        for encoding in QUICK_CHECK_ENCODINGS:
+            for text in text_variants:
+                try:
+                    encoded = text.encode(encoding)
+                except UnicodeEncodeError:
+                    continue
+
+                if not encoded or encoded in seen:
+                    continue
+                seen.add(encoded)
+                patterns.append(encoded)
+
+    return patterns
+
+
+def _set_search_file_meta(filepath: str, skipped: bool, failed: bool) -> None:
+    normalized = os.path.normcase(os.path.abspath(filepath))
+    with _SEARCH_FILE_META_LOCK:
+        _SEARCH_FILE_META[normalized] = (skipped, failed)
 
 
 def _normalize_keyword_list(keywords: list[str]) -> list[str]:
