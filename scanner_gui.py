@@ -38,7 +38,8 @@ class FileScannerApp(ctk.CTk):
         super().__init__()
 
         self.title("FILE SCANNER v1.0")
-        self.geometry("1100x700")
+        self.geometry("1400x900")
+        self.minsize(1100, 700)
         self.resizable(True, True)
 
         self._stop_flag = False
@@ -61,10 +62,10 @@ class FileScannerApp(ctk.CTk):
         self._path_values: dict[str, str] = {}
         self._search_mode = tk.StringVar(value="content")
 
-        self._font = ctk.CTkFont(size=14)
-        self._title_font = ctk.CTkFont(size=18, weight="bold")
-        self._tab_font = ctk.CTkFont(size=18)
-        self._summary_font = ctk.CTkFont(size=13)
+        self._font = ctk.CTkFont(family="맑은 고딕", size=13)
+        self._title_font = ctk.CTkFont(family="맑은 고딕", size=15, weight="bold")
+        self._tab_font = ctk.CTkFont(family="맑은 고딕", size=16)
+        self._summary_font = ctk.CTkFont(family="맑은 고딕", size=13)
 
         self._build_ui()
         self._load_system_drives()
@@ -75,22 +76,32 @@ class FileScannerApp(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self.tabview = ctk.CTkTabview(self)
+        self.tabview = ctk.CTkTabview(
+            self,
+            segmented_button_fg_color="#1a1d22",
+            segmented_button_selected_color="#1f6aa5",
+            segmented_button_selected_hover_color="#2980b9",
+            segmented_button_unselected_color="#2b2f38",
+            segmented_button_unselected_hover_color="#3a3f4b",
+            corner_radius=30,
+        )
         self.tabview.grid(row=0, column=0, padx=12, pady=(0, 12), sticky="nsew")
 
-        self.keyword_tab = self.tabview.add("키워드 검색")
-        self.pi_tab = self.tabview.add("개인정보 검색")
-        self.illegal_sw_tab = self.tabview.add("불법S/W파일")
+        self.keyword_tab = self.tabview.add("파일/문서")
+        self.pi_tab = self.tabview.add("개인정보")
+        self.illegal_sw_tab = self.tabview.add("불법SW파일")
 
-        # 탭 헤더 가독성 개선: 17pt 폰트 + 균등 배분 고정 폭
-        self.tabview.configure(anchor="center")
+        self.tabview.configure(anchor="center", border_width=0)
         self.tabview._segmented_button.configure(
-            font=self._tab_font,
+            font=ctk.CTkFont(family="맑은 고딕", size=18, weight="bold"),
             dynamic_resizing=False,
-            width=660,
+            width=750,
+            height=42,
+            corner_radius=6,
         )
         for tab_button in self.tabview._segmented_button._buttons_dict.values():
-            tab_button.configure(anchor="center", width=220)
+            tab_button.configure(anchor="center", width=240, height=42)
+        self.tabview._segmented_button.grid_configure(pady=(10, 0))
 
         self._build_keyword_tab(self.keyword_tab)
         self._build_placeholder_tab(self.pi_tab)
@@ -100,7 +111,7 @@ class FileScannerApp(ctk.CTk):
         tab.grid_rowconfigure(0, weight=1)
         tab.grid_columnconfigure(0, weight=1)
         label = ctk.CTkLabel(tab, text="준비 중", font=self._title_font)
-        label.grid(row=0, column=0, sticky="nsew")
+        label.grid(row=0, column=0, pady=(12, 0), sticky="nsew")
 
     def _build_keyword_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_rowconfigure(0, weight=1)
@@ -109,11 +120,11 @@ class FileScannerApp(ctk.CTk):
         tab.grid_columnconfigure(1, weight=1)
 
         left_panel = ctk.CTkFrame(tab, width=300)
-        left_panel.grid(row=0, column=0, padx=(0, 10), pady=(0, 10), sticky="nsew")
+        left_panel.grid(row=0, column=0, padx=(0, 10), pady=(12, 10), sticky="nsew")
         left_panel.grid_propagate(False)
 
         right_panel = ctk.CTkFrame(tab)
-        right_panel.grid(row=0, column=1, padx=(0, 0), pady=(0, 10), sticky="nsew")
+        right_panel.grid(row=0, column=1, padx=(0, 0), pady=(12, 10), sticky="nsew")
 
         bottom_bar = ctk.CTkFrame(tab)
         bottom_bar.grid(row=1, column=0, columnspan=2, sticky="sew")
@@ -156,7 +167,7 @@ class FileScannerApp(ctk.CTk):
             list_container,
             selectmode=tk.EXTENDED,
             exportselection=False,
-            font=("맑은 고딕", 15),
+            font=("맑은 고딕", 13),
             activestyle="none",
             height=10,
             bg="#121212",
@@ -316,7 +327,6 @@ class FileScannerApp(ctk.CTk):
         try:
             keywords = scanner_engine.load_keywords()
         except Exception:
-            # 시작 시 로그 영역은 비어 있어야 하므로 로드 실패는 조용히 무시한다.
             return
 
         for keyword in keywords:
@@ -983,8 +993,8 @@ class FileScannerApp(ctk.CTk):
             background="#101215",
             foreground="#f3f5f7",
             fieldbackground="#101215",
-            rowheight=30,
-            font=("맑은 고딕", 13),
+            rowheight=26,
+            font=("맑은 고딕", 12),
             bordercolor="#2f343b",
             lightcolor="#2f343b",
             darkcolor="#2f343b",
@@ -995,7 +1005,7 @@ class FileScannerApp(ctk.CTk):
             "Result.Treeview.Heading",
             background="#1a1d22",
             foreground="#f8fafc",
-            font=("맑은 고딕", 14, "bold"),
+            font=("맑은 고딕", 13, "bold"),
             bordercolor="#2f343b",
             lightcolor="#2f343b",
             darkcolor="#2f343b",
@@ -1013,7 +1023,6 @@ class FileScannerApp(ctk.CTk):
         try:
             self.after(0, lambda: callback(*args))
         except RuntimeError:
-            # 창 종료 중에는 after 등록이 실패할 수 있으므로 조용히 무시한다.
             return
 
     def _on_close(self) -> None:
