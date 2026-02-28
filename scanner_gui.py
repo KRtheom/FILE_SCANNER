@@ -64,7 +64,6 @@ class FileScannerApp(ctk.CTk):
 
         self._font = ctk.CTkFont(family="맑은 고딕", size=13)
         self._title_font = ctk.CTkFont(family="맑은 고딕", size=15, weight="bold")
-        self._tab_font = ctk.CTkFont(family="맑은 고딕", size=16)
         self._summary_font = ctk.CTkFont(family="맑은 고딕", size=13)
 
         self._build_ui()
@@ -73,45 +72,98 @@ class FileScannerApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self.tabview = ctk.CTkTabview(
-            self,
-            segmented_button_fg_color="#1a1d22",
-            segmented_button_selected_color="#1f6aa5",
-            segmented_button_selected_hover_color="#2980b9",
-            segmented_button_unselected_color="#2b2f38",
-            segmented_button_unselected_hover_color="#3a3f4b",
-            corner_radius=30,
-        )
-        self.tabview.grid(row=0, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        tab_bar = ctk.CTkFrame(self, fg_color="#141720", corner_radius=0, height=52)
+        tab_bar.grid(row=0, column=0, sticky="ew")
+        tab_bar.grid_propagate(False)
+        tab_bar.grid_columnconfigure(0, weight=0)
+        tab_bar.grid_columnconfigure(1, weight=0)
+        tab_bar.grid_columnconfigure(2, weight=0)
+        tab_bar.grid_columnconfigure(3, weight=1)
 
-        self.keyword_tab = self.tabview.add("파일/문서")
-        self.pi_tab = self.tabview.add("개인정보")
-        self.illegal_sw_tab = self.tabview.add("불법SW파일")
+        self._tab_buttons: dict[str, ctk.CTkButton] = {}
+        self._tab_frames: dict[str, ctk.CTkFrame] = {}
+        self._current_tab: str = ""
 
-        self.tabview.configure(anchor="center", border_width=0)
-        self.tabview._segmented_button.configure(
-            font=ctk.CTkFont(family="맑은 고딕", size=18, weight="bold"),
-            dynamic_resizing=False,
-            width=750,
-            height=42,
-            corner_radius=6,
-        )
-        for tab_button in self.tabview._segmented_button._buttons_dict.values():
-            tab_button.configure(anchor="center", width=240, height=42)
-        self.tabview._segmented_button.grid_configure(pady=(10, 0))
+        tab_names = ["파일/문서", "개인정보", "불법S/W파일"]
+        for col, name in enumerate(tab_names):
+            btn = ctk.CTkButton(
+                tab_bar,
+                text=name,
+                font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+                fg_color="transparent",
+                hover_color="#252a36",
+                text_color="#6b7280",
+                corner_radius=0,
+                height=52,
+                width=180,
+                anchor="center",
+                command=lambda n=name: self._switch_tab(n),
+            )
+            btn.grid(row=0, column=col, sticky="ns", padx=(0, 0))
+            self._tab_buttons[name] = btn
 
-        self._build_keyword_tab(self.keyword_tab)
-        self._build_placeholder_tab(self.pi_tab)
-        self._build_placeholder_tab(self.illegal_sw_tab)
+        separator = ctk.CTkFrame(self, fg_color="#2f343b", height=2, corner_radius=0)
+        separator.grid(row=1, column=0, sticky="ew")
+
+        content_area = ctk.CTkFrame(self, fg_color="transparent")
+        content_area.grid(row=2, column=0, padx=12, pady=(8, 12), sticky="nsew")
+        content_area.grid_rowconfigure(0, weight=1)
+        content_area.grid_columnconfigure(0, weight=1)
+
+        tab1 = ctk.CTkFrame(content_area, fg_color="transparent")
+        self._tab_frames["파일/문서"] = tab1
+        self._build_keyword_tab(tab1)
+
+        tab2 = ctk.CTkFrame(content_area, fg_color="transparent")
+        self._tab_frames["개인정보"] = tab2
+        self._build_placeholder_tab(tab2)
+
+        tab3 = ctk.CTkFrame(content_area, fg_color="transparent")
+        self._tab_frames["불법S/W파일"] = tab3
+        self._build_placeholder_tab(tab3)
+
+        self._switch_tab("파일/문서")
+
+    def _switch_tab(self, name: str) -> None:
+        if name == self._current_tab:
+            return
+
+        for frame in self._tab_frames.values():
+            frame.grid_forget()
+
+        self._tab_frames[name].grid(row=0, column=0, sticky="nsew")
+
+        for btn_name, btn in self._tab_buttons.items():
+            if btn_name == name:
+                btn.configure(
+                    fg_color="#1f6aa5",
+                    text_color="#ffffff",
+                    hover_color="#2980b9",
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color="#6b7280",
+                    hover_color="#252a36",
+                )
+
+        self._current_tab = name
 
     def _build_placeholder_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_rowconfigure(0, weight=1)
         tab.grid_columnconfigure(0, weight=1)
-        label = ctk.CTkLabel(tab, text="준비 중", font=self._title_font)
-        label.grid(row=0, column=0, pady=(12, 0), sticky="nsew")
+        label = ctk.CTkLabel(
+            tab,
+            text="준비 중",
+            font=ctk.CTkFont(family="맑은 고딕", size=20),
+            text_color="#6b7280",
+        )
+        label.grid(row=0, column=0, sticky="nsew")
 
     def _build_keyword_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_rowconfigure(0, weight=1)
