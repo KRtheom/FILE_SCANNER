@@ -634,7 +634,8 @@ class FileScannerApp(ctk.CTk):
                     if index % 1000 == 0 or index == total_files:
                         self._call_ui(self._update_progress, index, total_files)
             else:
-                with ThreadPoolExecutor(max_workers=4) as executor:
+                with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4) + 2)) as executor:
+
                     self._executor = executor
                     future_to_file = {
                         executor.submit(scanner_engine.search_file, file_path, keywords): file_path
