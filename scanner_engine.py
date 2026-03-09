@@ -115,6 +115,8 @@ def scan_files(paths: list[str], extensions: set[str] | None = DEFAULT_EXTENSION
                                 continue
                             walk_dir(entry_path)
                         elif entry.is_file(follow_symlinks=False):
+                            if _is_temp_file(entry.name):
+                                continue
                             _, ext = os.path.splitext(entry.name)
                             if normalized_extensions is None or ext.lower() in normalized_extensions:
                                 file_paths.add(entry_path)
@@ -546,40 +548,120 @@ def _extract_doc(filepath: str) -> list[tuple[str, str]]:
 
 
 def _extract_hwp(filepath: str) -> list[tuple[str, str]]:
-    if olefile is None:
-        raise RuntimeError("olefile 미설치")
+    """HWP 파일에서 텍스트를 추출한다.
 
+    OLE 형식 우선 시도하고, 실패 시 ZIP(HWPX) → HWPML → 바이너리 순으로 폴백한다.
+    """
+    # ── 1단계: OLE 형식 시도 ──
+    if olefile is not None:
+        try:
+            if olefile.isOleFile(filepath):
+                items = _extract_hwp_ole(filepath)
+                if items:
+                    return items
+        except Exception as exc:
+            logger.debug("HWP OLE 추출 실패: %s (%s)", filepath, exc)
+
+    # ── 2단계: ZIP(HWPX) 형식 폴백 ──
+    try:
+        if zipfile.is_zipfile(filepath):
+            items = _extract_hwpx(filepath)
+            if items:
+                return items
+    except Exception as exc:
+        logger.debug("HWP ZIP 폴백 추출 실패: %s (%s)", filepath, exc)
+
+    # ── 3단계: HWPML(XML) 직접 파싱 ──
+    try:
+        items = _extract_hwpml(filepath)
+        if items:
+            return items
+    except Exception as exc:
+        logger.debug("HWPML 추출 실패: %s (%s)", filepath, exc)
+
+    # ── 4단계: 바이너리 텍스트 추출 최후 폴백 ──
+    try:
+        return _extract_hwp_binary_fallback(filepath)
+    except Exception as exc:
+        logger.debug("HWP 바이너리 폴백 실패: %s (%s)", filepath, exc)
+
+    return []
+
+
+def _extract_hwpml(filepath: str) -> list[tuple[str, str]]:
+    """HWPML(XML) 형식 파일에서 텍스트를 추출한다."""
     items: list[tuple[str, str]] = []
     line_no = 1
 
-    with olefile.OleFileIO(filepath) as ole:
-        compressed = _is_hwp_compressed(ole)
-        section_streams = sorted(_iter_hwp_section_streams(ole))
+    for encoding in ("utf-8", "cp949", "euc-kr"):
+        try:
+            with open(filepath, "r", encoding=encoding) as f:
+                content = f.read()
+            break
+        except (UnicodeDecodeError, OSError):
+            continue
+    else:
+        return []
 
-        for stream_name in section_streams:
-            try:
-                raw_bytes = ole.openstream(stream_name).read()
-            except OSError as exc:
-                logger.debug("HWP 섹션 읽기 실패: %s (%s)", stream_name, exc)
-                continue
+    # XML 여부 확인
+    if not content.strip().startswith("<?xml") and "<HWPML" not in content[:500]:
+        return []
 
-            content = _decompress_hwp_stream(raw_bytes, compressed)
-            if not content:
-                continue
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        # BOM이나 선언부 문제 시 정규식으로 텍스트 추출
+        return _extract_hwpml_regex(content)
 
-            for paragraph_text in _parse_hwp_para_text(content):
-                items.append((f"L{line_no}", paragraph_text))
+    # XML 트리에서 텍스트 노드만 추출
+    for elem in root.iter():
+        tag = elem.tag
+        if isinstance(tag, str) and "}" in tag:
+            tag = tag.split("}", 1)[1]
+
+        # CHAR, T, TEXT 등 본문 텍스트 태그
+        if tag.upper() in ("CHAR", "T", "TEXT"):
+            if elem.text:
+                cleaned = _clean_text(elem.text)
+                if cleaned:
+                    items.append((f"L{line_no}", cleaned))
+                    line_no += 1
+
+    # 태그 기반 추출 실패 시 itertext 폴백
+    if not items:
+        for raw_text in root.itertext():
+            cleaned = _clean_text(raw_text)
+            if cleaned and len(cleaned) >= 2 and re.search(r"[가-힣]", cleaned):
+                items.append((f"L{line_no}", cleaned))
                 line_no += 1
 
-        if items:
-            return items
+    return items
 
-        # 섹션 파싱 실패 시 미리보기 텍스트 스트림으로 최소한의 텍스트를 시도한다.
-        if ole.exists("PrvText"):
-            preview = ole.openstream("PrvText").read().decode("utf-16le", errors="ignore")
-            for line in preview.splitlines():
-                cleaned = _clean_text(line)
-                if cleaned:
+
+def _extract_hwpml_regex(content: str) -> list[tuple[str, str]]:
+    """XML 파싱 실패 시 정규식으로 HWPML 본문 텍스트를 추출한다."""
+    items: list[tuple[str, str]] = []
+    line_no = 1
+    seen: set[str] = set()
+
+    # <CHAR> ... </CHAR>, <T> ... </T> 등의 내용 추출
+    for match in re.finditer(r"<(?:CHAR|T|TEXT)[^>]*>([^<]+)</", content):
+        cleaned = _clean_text(match.group(1))
+        if cleaned and len(cleaned) >= 2 and re.search(r"[가-힣]", cleaned):
+            lowered = cleaned.lower()
+            if lowered not in seen:
+                seen.add(lowered)
+                items.append((f"L{line_no}", cleaned))
+                line_no += 1
+
+    # 태그 매칭 실패 시 모든 태그 사이 텍스트 추출
+    if not items:
+        for match in re.finditer(r">([^<]+)<", content):
+            cleaned = _clean_text(match.group(1))
+            if cleaned and len(cleaned) >= 2 and re.search(r"[가-힣]", cleaned):
+                lowered = cleaned.lower()
+                if lowered not in seen:
+                    seen.add(lowered)
                     items.append((f"L{line_no}", cleaned))
                     line_no += 1
 
@@ -714,6 +796,10 @@ def _normalize_keyword_list(keywords: list[str]) -> list[str]:
 
 def _is_excluded_dir(dir_name: str) -> bool:
     return dir_name.lower() in EXCLUDED_DIR_NAMES
+
+
+def _is_temp_file(filename: str) -> bool:
+    return filename.startswith(chr(126)+chr(36)) or filename.startswith(chr(126))
 
 
 def _is_hwp_compressed(ole: Any) -> bool:
