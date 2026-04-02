@@ -87,9 +87,9 @@ MAX_EXTRACT_FILE_SIZE: int = 50 * 1024 * 1024
 MAX_PDF_PAGES: int = 500
 FILE_PROCESS_TIMEOUT: int = 30
 
-MIN_WORKERS: int = 2
+MIN_WORKERS: int = 4
 MAX_WORKERS: int = 8
-CPU_DIVISOR: int = 2
+CPU_DIVISOR: int = 1
 
 _SEARCH_FILE_META: dict[str, tuple[bool, bool]] = {}
 _SEARCH_FILE_META_LOCK = threading.Lock()

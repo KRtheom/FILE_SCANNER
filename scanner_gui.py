@@ -24,6 +24,13 @@ TARGET_EXTENSIONS: set[str] = {
     ".hwp", ".hwpx", ".csv", ".txt",
 }
 
+DEFAULT_KEYWORDS: list[str] = [
+    "접대", "상품권", "선물", "골프", "대외비", "평가", "교수",
+    "영업비", "할인", "무상", "컴프", "COMP", "민원", "보상",
+    "대여", "심의", "합의서", "검찰", "경찰", "국세청", "세무서",
+    "공정위", "감사원",
+]
+
 _HELP_TEXTS: dict[str, str] = {
     "파일/문서": (
         "■ 파일/문서 검색\n\n"
@@ -44,8 +51,8 @@ _HELP_TEXTS: dict[str, str] = {
     ),
 }
 
-_UI_BATCH_INTERVAL_MS = 150
-_UI_BATCH_MAX_ROWS = 80
+_UI_BATCH_INTERVAL_MS = 500
+_UI_BATCH_MAX_ROWS = 20
 
 
 class FileScannerApp(ctk.CTk):
@@ -54,7 +61,7 @@ class FileScannerApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
 
-        self.title("FILE SCANNER v1.1")
+        self.title("FILE SCANNER v1.2")
         try:
             self.iconbitmap(self._resource_path("app_icon.ico"))
         except Exception:
@@ -65,6 +72,8 @@ class FileScannerApp(ctk.CTk):
 
         self._stop_flag = False
         self._is_searching = False
+        self._search_start_time: float = 0.0
+        self._progress_history: list[tuple[float, int]] = []
         self._results: list[dict] = []
         self._all_results: list[dict[str, object]] = []
         self._search_thread: threading.Thread | None = None
@@ -79,7 +88,6 @@ class FileScannerApp(ctk.CTk):
         self._ext_select_all = True
         self._filter_popup: tk.Toplevel | None = None
 
-        # 정렬 상태 관리: {컬럼명: 오름차순 여부}
         self._sort_state: dict[str, bool] = {}
 
         self._path_vars: dict[str, ctk.BooleanVar] = {}
@@ -96,7 +104,17 @@ class FileScannerApp(ctk.CTk):
 
         self._build_ui()
         self._load_system_drives()
+        self._load_default_keywords()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 기본 키워드 로드
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _load_default_keywords(self) -> None:
+        """기본 키워드를 리스트박스에 로드한다."""
+        for keyword in DEFAULT_KEYWORDS:
+            self._insert_keyword_if_new(keyword)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 배치 UI 갱신
@@ -126,38 +144,45 @@ class FileScannerApp(ctk.CTk):
 
     def _process_ui_queue(self) -> None:
         """메인 스레드에서 일정 간격으로 큐를 꺼내 배치 처리한다."""
-        rows_processed = 0
         last_progress: dict[str, object] | None = None
-        had_rows = False
 
-        while True:
+        count = 0
+        while count < 500:
             try:
                 item = self._ui_queue.get_nowait()
             except queue.Empty:
                 break
+            count += 1
 
             item_type = item.get("type")
 
             if item_type == "progress":
                 last_progress = item
-            elif rows_processed < _UI_BATCH_MAX_ROWS:
-                if item_type == "result":
-                    self._insert_tree_result_from_result(item["data"])
-                    rows_processed += 1
-                    had_rows = True
-                elif item_type == "fail":
-                    self._insert_tree_fail(item["file_path"], item["error"])
-                    rows_processed += 1
-                    had_rows = True
-            else:
-                self._ui_queue.put(item)
-                break
-
-        if had_rows:
-            self._refresh_summary_text()
+            elif item_type == "result":
+                self._all_results.append(
+                    self._build_tree_row(
+                        str(item["data"].get("keyword", "")),
+                        str(item["data"].get("file_path", "")),
+                        str(item["data"].get("location", "")),
+                        str(item["data"].get("context", "")).replace("\n", " ").strip(),
+                    )
+                )
+            elif item_type == "fail":
+                self._all_results.append(
+                    self._build_tree_row(
+                        "실패", str(item["file_path"]), "-",
+                        str(item["error"]), tags=("fail",),
+                    )
+                )
 
         if last_progress is not None:
             self._update_progress(last_progress["done"], last_progress["total"])
+
+        total = len(self._all_results)
+        if self._base_summary_text:
+            self.summary_label.configure(
+                text=f"{self._base_summary_text} | 수집 {total:,}건",
+            )
 
         if self._is_searching or not self._ui_queue.empty():
             self._batch_after_id = self.after(
@@ -167,8 +192,7 @@ class FileScannerApp(ctk.CTk):
             self._batch_after_id = None
 
     def _flush_ui_queue(self) -> None:
-        """검색 종료 시 큐에 남은 항목을 모두 처리한다."""
-        had_rows = False
+        """검색 종료 시 큐에 남은 항목을 모두 처리하고 트리뷰에 일괄 삽입한다."""
         while True:
             try:
                 item = self._ui_queue.get_nowait()
@@ -176,16 +200,44 @@ class FileScannerApp(ctk.CTk):
                 break
             item_type = item.get("type")
             if item_type == "result":
-                self._insert_tree_result_from_result(item["data"])
-                had_rows = True
+                self._all_results.append(
+                    self._build_tree_row(
+                        str(item["data"].get("keyword", "")),
+                        str(item["data"].get("file_path", "")),
+                        str(item["data"].get("location", "")),
+                        str(item["data"].get("context", "")).replace("\n", " ").strip(),
+                    )
+                )
             elif item_type == "fail":
-                self._insert_tree_fail(item["file_path"], item["error"])
-                had_rows = True
+                self._all_results.append(
+                    self._build_tree_row(
+                        "실패", str(item["file_path"]), "-",
+                        str(item["error"]), tags=("fail",),
+                    )
+                )
             elif item_type == "progress":
                 self._update_progress(item["done"], item["total"])
 
-        if had_rows:
-            self._refresh_summary_text()
+        for row in self._all_results:
+            self._keyword_filter.add(str(row.get("keyword", "")))
+            self._ext_filter.add(str(row.get("extension", "")))
+
+        self._flush_insert_index = 0
+        self._flush_batch_insert()
+
+    def _flush_batch_insert(self) -> None:
+        """트리뷰에 200건씩 나눠서 삽입한다."""
+        batch = 200
+        end = min(self._flush_insert_index + batch, len(self._all_results))
+        for i in range(self._flush_insert_index, end):
+            row = self._all_results[i]
+            if self._row_passes_filters(row):
+                self._insert_tree_row(row)
+        self._flush_insert_index = end
+        self._refresh_summary_text()
+        if self._flush_insert_index < len(self._all_results):
+            self.after(10, self._flush_batch_insert)
+
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # UI 빌드
@@ -324,57 +376,37 @@ class FileScannerApp(ctk.CTk):
         panel.grid_columnconfigure(0, weight=1)
 
         title = ctk.CTkLabel(
-            panel,
-            text="검색 대상",
-            font=self._title_font,
-            anchor="w",
-            text_color="#1f2937",
+            panel, text="검색 대상", font=self._title_font,
+            anchor="w", text_color="#1f2937",
         )
         title.grid(row=0, column=0, padx=12, pady=(12, 8), sticky="ew")
 
         self.path_frame = ctk.CTkScrollableFrame(
-            panel,
-            width=296,
-            height=170,
-            fg_color="#f9fafb",
-            corner_radius=6,
+            panel, width=296, height=170,
+            fg_color="#f9fafb", corner_radius=6,
             scrollbar_button_color="#d1d5db",
             scrollbar_button_hover_color="#9ca3af",
         )
         self.path_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
 
         self.add_folder_button = ctk.CTkButton(
-            panel,
-            text="폴더 추가",
-            command=self._on_add_folder,
-            font=self._font,
-            height=32,
-            fg_color="#1a56db",
-            hover_color="#1648c0",
-            text_color="#ffffff",
+            panel, text="폴더 추가", command=self._on_add_folder,
+            font=self._font, height=32,
+            fg_color="#1a56db", hover_color="#1648c0", text_color="#ffffff",
             corner_radius=6,
         )
         self.add_folder_button.grid(row=2, column=0, padx=12, pady=(0, 14), sticky="ew")
 
         keyword_title = ctk.CTkLabel(
-            panel,
-            text="키워드 관리",
-            font=self._title_font,
-            anchor="w",
-            text_color="#1f2937",
+            panel, text="키워드 관리", font=self._title_font,
+            anchor="w", text_color="#1f2937",
         )
         keyword_title.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
 
         self.keyword_entry = ctk.CTkEntry(
-            panel,
-            font=self._font,
-            placeholder_text="키워드 입력",
-            fg_color="#f9fafb",
-            border_color="#d1d5db",
-            text_color="#1f2937",
-            placeholder_text_color="#9ca3af",
-            corner_radius=6,
-            height=32,
+            panel, font=self._font, placeholder_text="키워드 입력",
+            fg_color="#f9fafb", border_color="#d1d5db", text_color="#1f2937",
+            placeholder_text_color="#9ca3af", corner_radius=6, height=32,
         )
         self.keyword_entry.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
         self.keyword_entry.bind("<Return>", self._on_add_keyword)
@@ -386,25 +418,17 @@ class FileScannerApp(ctk.CTk):
         list_container.grid_columnconfigure(0, weight=1)
 
         self.keyword_listbox = tk.Listbox(
-            list_container,
-            selectmode=tk.EXTENDED,
-            exportselection=False,
-            font=("맑은 고딕", 13, "bold"),
-            activestyle="none",
-            height=10,
-            bg="#f9fafb",
-            fg="#1f2937",
-            selectbackground="#1a56db",
-            selectforeground="#ffffff",
-            highlightthickness=1,
-            highlightbackground="#d1d5db",
-            borderwidth=0,
-            relief="flat",
+            list_container, selectmode=tk.EXTENDED, exportselection=False,
+            font=("맑은 고딕", 13, "bold"), activestyle="none", height=10,
+            bg="#f9fafb", fg="#1f2937",
+            selectbackground="#1a56db", selectforeground="#ffffff",
+            highlightthickness=1, highlightbackground="#d1d5db",
+            borderwidth=0, relief="flat",
         )
         self.keyword_listbox.grid(row=0, column=0, sticky="nsew")
 
         keyword_scroll = tk.Scrollbar(
-            list_container, orient="vertical", command=self.keyword_listbox.yview
+            list_container, orient="vertical", command=self.keyword_listbox.yview,
         )
         keyword_scroll.grid(row=0, column=1, sticky="ns")
         self.keyword_listbox.config(yscrollcommand=keyword_scroll.set)
@@ -415,37 +439,22 @@ class FileScannerApp(ctk.CTk):
             button_row.grid_columnconfigure(col, weight=1)
 
         add_button = ctk.CTkButton(
-            button_row,
-            text="추가",
-            command=self._on_add_keyword,
-            font=self._font,
-            height=30,
-            corner_radius=6,
-            fg_color="#1a56db",
-            hover_color="#1648c0",
-            text_color="#ffffff",
+            button_row, text="추가", command=self._on_add_keyword,
+            font=self._font, height=30, corner_radius=6,
+            fg_color="#1a56db", hover_color="#1648c0", text_color="#ffffff",
         )
         add_button.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
         remove_button = ctk.CTkButton(
-            button_row,
-            text="삭제",
-            command=self._on_remove_keyword,
-            font=self._font,
-            height=30,
-            corner_radius=6,
-            fg_color="#e5e7eb",
-            hover_color="#d1d5db",
-            text_color="#374151",
+            button_row, text="삭제", command=self._on_remove_keyword,
+            font=self._font, height=30, corner_radius=6,
+            fg_color="#e5e7eb", hover_color="#d1d5db", text_color="#374151",
         )
         remove_button.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         search_mode_title = ctk.CTkLabel(
-            panel,
-            text="검색 범위",
-            font=self._font,
-            anchor="w",
-            text_color="#1f2937",
+            panel, text="검색 범위", font=self._font,
+            anchor="w", text_color="#1f2937",
         )
         search_mode_title.grid(row=7, column=0, padx=12, pady=(0, 6), sticky="ew")
 
@@ -455,28 +464,18 @@ class FileScannerApp(ctk.CTk):
         search_mode_row.grid_columnconfigure(1, weight=1)
 
         filename_radio = ctk.CTkRadioButton(
-            search_mode_row,
-            text="파일명",
-            variable=self._search_mode,
-            value="filename",
-            font=self._font,
-            text_color="#374151",
-            fg_color="#1a56db",
-            hover_color="#d0e3ff",
-            border_color="#9ca3af",
+            search_mode_row, text="파일명",
+            variable=self._search_mode, value="filename",
+            font=self._font, text_color="#374151",
+            fg_color="#1a56db", hover_color="#d0e3ff", border_color="#9ca3af",
         )
         filename_radio.grid(row=0, column=0, padx=(0, 8), sticky="w")
 
         content_radio = ctk.CTkRadioButton(
-            search_mode_row,
-            text="문서(내용)",
-            variable=self._search_mode,
-            value="content",
-            font=self._font,
-            text_color="#374151",
-            fg_color="#1a56db",
-            hover_color="#d0e3ff",
-            border_color="#9ca3af",
+            search_mode_row, text="문서(내용)",
+            variable=self._search_mode, value="content",
+            font=self._font, text_color="#374151",
+            fg_color="#1a56db", hover_color="#d0e3ff", border_color="#9ca3af",
         )
         content_radio.grid(row=0, column=1, sticky="w")
 
@@ -486,11 +485,8 @@ class FileScannerApp(ctk.CTk):
         panel.grid_columnconfigure(0, weight=1)
 
         title = ctk.CTkLabel(
-            panel,
-            text="검색 결과",
-            font=self._title_font,
-            anchor="w",
-            text_color="#1f2937",
+            panel, text="검색 결과", font=self._title_font,
+            anchor="w", text_color="#1f2937",
         )
         title.grid(row=0, column=0, padx=12, pady=(12, 8), sticky="ew")
 
@@ -515,7 +511,17 @@ class FileScannerApp(ctk.CTk):
         )
         self.result_tree.grid(row=0, column=0, sticky="nsew")
 
-        # 키워드/확장자: 필터 팝업, 나머지: 정렬
+        # ── 검색 진행 오버레이 ──
+        self._overlay_label = ctk.CTkLabel(
+            tree_frame,
+            text="",
+            font=ctk.CTkFont(family="맑은 고딕", size=20, weight="bold"),
+            text_color="#374151",
+            fg_color="#ffffff",
+            corner_radius=12,
+        )
+
+     
         self.result_tree.heading(
             "keyword", text="키워드", command=self._show_keyword_filter_popup,
         )
@@ -540,40 +546,20 @@ class FileScannerApp(ctk.CTk):
         )
         self.result_tree.heading("fullpath", text="전체경로")
 
-        self.result_tree.column(
-            "keyword", width=80, minwidth=80, anchor="w", stretch=False,
-        )
-        self.result_tree.column(
-            "filename", width=180, minwidth=180, anchor="w", stretch=False,
-        )
-        self.result_tree.column(
-            "extension", width=70, minwidth=70, anchor="w", stretch=False,
-        )
-        self.result_tree.column(
-            "filepath", width=250, minwidth=250, anchor="w", stretch=False,
-        )
-        self.result_tree.column(
-            "location", width=80, minwidth=80, anchor="w", stretch=False,
-        )
-        self.result_tree.column(
-            "context", width=350, minwidth=220, anchor="w", stretch=True,
-        )
-        self.result_tree.column(
-            "fullpath", width=0, minwidth=0, stretch=False,
-        )
+        self.result_tree.column("keyword", width=80, minwidth=80, anchor="w", stretch=False)
+        self.result_tree.column("filename", width=180, minwidth=180, anchor="w", stretch=False)
+        self.result_tree.column("extension", width=70, minwidth=70, anchor="w", stretch=False)
+        self.result_tree.column("filepath", width=250, minwidth=250, anchor="w", stretch=False)
+        self.result_tree.column("location", width=80, minwidth=80, anchor="w", stretch=False)
+        self.result_tree.column("context", width=350, minwidth=220, anchor="w", stretch=True)
+        self.result_tree.column("fullpath", width=0, minwidth=0, stretch=False)
         self.result_tree.tag_configure("fail", foreground="#dc2626")
 
-        tree_v_scroll = ttk.Scrollbar(
-            tree_frame, orient="vertical", command=self.result_tree.yview,
-        )
+        tree_v_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.result_tree.yview)
         tree_v_scroll.grid(row=0, column=1, sticky="ns")
-        tree_h_scroll = ttk.Scrollbar(
-            tree_frame, orient="horizontal", command=self.result_tree.xview,
-        )
+        tree_h_scroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.result_tree.xview)
         tree_h_scroll.grid(row=1, column=0, sticky="ew")
-        self.result_tree.configure(
-            yscrollcommand=tree_v_scroll.set, xscrollcommand=tree_h_scroll.set,
-        )
+        self.result_tree.configure(yscrollcommand=tree_v_scroll.set, xscrollcommand=tree_h_scroll.set)
 
         self.result_menu = tk.Menu(self, tearoff=0)
         self.result_menu.add_command(label="파일 열기", command=self._open_selected_file)
@@ -583,11 +569,8 @@ class FileScannerApp(ctk.CTk):
         self.result_tree.bind("<Button-3>", self._on_tree_right_click)
 
         self.summary_label = ctk.CTkLabel(
-            panel,
-            text="",
-            font=self._summary_font,
-            anchor="w",
-            text_color="#6b7280",
+            panel, text="", font=self._summary_font,
+            anchor="w", text_color="#6b7280",
         )
         self.summary_label.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="ew")
 
@@ -595,48 +578,28 @@ class FileScannerApp(ctk.CTk):
         panel.grid_columnconfigure(1, weight=1)
 
         self.progress_label = ctk.CTkLabel(
-            panel,
-            text="진행: 0% (0/0파일)",
-            font=self._font,
-            text_color="#374151",
+            panel, text="진행: 0% (0/0파일)", font=self._font, text_color="#374151",
         )
         self.progress_label.grid(row=0, column=0, padx=(12, 8), pady=10, sticky="w")
 
         self.progress_bar = ctk.CTkProgressBar(
-            panel,
-            fg_color="#e5e7eb",
-            progress_color="#1a56db",
-            corner_radius=4,
-            height=14,
+            panel, fg_color="#e5e7eb", progress_color="#1a56db",
+            corner_radius=4, height=14,
         )
         self.progress_bar.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="ew")
         self.progress_bar.set(0)
 
         self.search_button = ctk.CTkButton(
-            panel,
-            text="검색 시작",
-            command=self._on_search_toggle,
-            font=self._font,
-            width=110,
-            height=34,
-            corner_radius=6,
-            fg_color="#1a56db",
-            hover_color="#1648c0",
-            text_color="#ffffff",
+            panel, text="검색 시작", command=self._on_search_toggle,
+            font=self._font, width=110, height=34, corner_radius=6,
+            fg_color="#1a56db", hover_color="#1648c0", text_color="#ffffff",
         )
         self.search_button.grid(row=0, column=2, padx=(0, 8), pady=10)
 
         self.save_report_button = ctk.CTkButton(
-            panel,
-            text="리포트 저장(Excel)",
-            command=self._on_save_report,
-            font=self._font,
-            width=150,
-            height=34,
-            corner_radius=6,
-            fg_color="#059669",
-            hover_color="#047857",
-            text_color="#ffffff",
+            panel, text="리포트 저장(Excel)", command=self._on_save_report,
+            font=self._font, width=150, height=34, corner_radius=6,
+            fg_color="#059669", hover_color="#047857", text_color="#ffffff",
         )
         self.save_report_button.grid(row=0, column=3, padx=(0, 12), pady=10)
 
@@ -644,7 +607,6 @@ class FileScannerApp(ctk.CTk):
     # 정렬
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    # 컬럼 이름 → _all_results 딕셔너리 키 매핑
     _COLUMN_TO_KEY: dict[str, str] = {
         "keyword": "keyword",
         "filename": "filename",
@@ -655,7 +617,6 @@ class FileScannerApp(ctk.CTk):
     }
 
     def _sort_by_column(self, column: str) -> None:
-        """지정 컬럼 기준으로 _all_results를 정렬하고 트리뷰를 다시 그린다."""
         if self._is_searching:
             return
 
@@ -668,7 +629,6 @@ class FileScannerApp(ctk.CTk):
             reverse=not ascending,
         )
 
-        # 헤더 텍스트에 정렬 방향 표시
         arrow = " ↑" if ascending else " ↓"
         base_names = {
             "filename": "파일명",
@@ -689,10 +649,41 @@ class FileScannerApp(ctk.CTk):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _load_system_drives(self) -> None:
-        for letter in string.ascii_uppercase:
-            drive = f"{letter}:\\"
-            if os.path.exists(drive):
+        """시스템 드라이브 목록을 백그라운드에서 수집한다."""
+        def _detect_drives() -> list[str]:
+            drives: list[str] = []
+            try:
+                import ctypes
+                bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+                for i in range(26):
+                    if bitmask & (1 << i):
+                        letter = chr(ord("A") + i)
+                        drive = f"{letter}:\\"
+                        drive_type = ctypes.windll.kernel32.GetDriveTypeW(drive)
+                        if drive_type in (2, 3):
+                            drives.append(drive)
+            except Exception:
+                for letter in string.ascii_uppercase:
+                    drive = f"{letter}:\\"
+                    try:
+                        if os.path.isdir(drive):
+                            drives.append(drive)
+                    except OSError:
+                        continue
+            return drives
+
+        def _on_drives_detected(drives: list[str]) -> None:
+            for drive in drives:
                 self._add_path_option(drive, checked=False)
+
+        def _worker() -> None:
+            drives = _detect_drives()
+            try:
+                self.after(0, lambda: _on_drives_detected(drives))
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_add_folder(self) -> None:
         folder = filedialog.askdirectory()
@@ -708,17 +699,11 @@ class FileScannerApp(ctk.CTk):
 
         var = ctk.BooleanVar(value=checked)
         checkbox = ctk.CTkCheckBox(
-            self.path_frame,
-            text=normalized_path,
-            variable=var,
-            onvalue=True,
-            offvalue=False,
-            font=self._drive_font,
-            text_color="#374151",
-            fg_color="#1a56db",
-            hover_color="#d0e3ff",
-            border_color="#9ca3af",
-            checkmark_color="#ffffff",
+            self.path_frame, text=normalized_path,
+            variable=var, onvalue=True, offvalue=False,
+            font=self._drive_font, text_color="#374151",
+            fg_color="#1a56db", hover_color="#d0e3ff",
+            border_color="#9ca3af", checkmark_color="#ffffff",
         )
         checkbox.pack(anchor="w", fill="x", padx=4, pady=2)
 
@@ -771,6 +756,11 @@ class FileScannerApp(ctk.CTk):
         self._results = []
         self._stop_flag = False
         self._is_searching = True
+        self._search_start_time = time.time()
+        self._progress_history.clear()
+        self._overlay_label.configure(text="파일 목록 수집 중...")
+        self._overlay_label.place(relx=0.5, rely=0.4, anchor="center")
+        self._overlay_label.lift()
         self._fail_count = 0
         self._skip_count = 0
         self._sort_state.clear()
@@ -809,10 +799,7 @@ class FileScannerApp(ctk.CTk):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _search_worker(
-        self,
-        paths: list[str],
-        keywords: list[str],
-        search_mode: str,
+        self, paths: list[str], keywords: list[str], search_mode: str,
     ) -> None:
         start_time = time.perf_counter()
         found_count = 0
@@ -899,11 +886,17 @@ class FileScannerApp(ctk.CTk):
                         file_path = future_to_file[future]
                         completed_count += 1
 
-                        # 실패 플래그: future 예외 여부로 한번만 판정
                         future_failed = False
                         try:
-                            matches = future.result()
+                            matches = future.result(
+                                timeout=scanner_engine.FILE_PROCESS_TIMEOUT,
+                            )
                             error_message = ""
+                        except TimeoutError:
+                            future_failed = True
+                            future.cancel()
+                            matches = []
+                            error_message = f"처리 시간 초과 ({scanner_engine.FILE_PROCESS_TIMEOUT}s)"
                         except Exception:
                             future_failed = True
                             matches = []
@@ -913,7 +906,6 @@ class FileScannerApp(ctk.CTk):
                         if meta.get("skipped", False):
                             self._skip_count += 1
 
-                        # fail_count 이중 계산 방지
                         if future_failed:
                             self._fail_count += 1
                         elif meta.get("failed", False):
@@ -944,7 +936,6 @@ class FileScannerApp(ctk.CTk):
         except Exception:
             self._fail_count += 1
         finally:
-            # 미소비 메타 일괄 정리 (중단/예외 시 메모리 누수 방지)
             scanner_engine.clear_all_search_file_meta()
             self._executor = None
             elapsed = time.perf_counter() - start_time
@@ -964,6 +955,8 @@ class FileScannerApp(ctk.CTk):
 
     def _on_search_worker_done(self, summary: str) -> None:
         self._is_searching = False
+        self._overlay_label.place_forget()
+        self._search_start_time: float = 0.0
         self._stop_batch_timer()
         self._flush_ui_queue()
         self._set_summary_text(summary)
@@ -1009,14 +1002,59 @@ class FileScannerApp(ctk.CTk):
         if total <= 0:
             ratio = 0.0
             percent = 0
+            eta_text = ""
+            overlay_text = ""
         else:
             ratio = min(1.0, max(0.0, done / total))
             percent = int(ratio * 100)
+            now = time.time()
+            self._progress_history.append((now, done))
+            if len(self._progress_history) > 100:
+                self._progress_history = self._progress_history[-100:]
+
+            if len(self._progress_history) >= 2 and ratio < 1.0:
+                oldest_time, oldest_done = self._progress_history[0]
+                dt = now - oldest_time
+                dd = done - oldest_done
+                if dd > 0 and dt > 0:
+                    speed = dd / dt
+                    remaining = (total - done) / speed
+                    if remaining >= 60:
+                        m = int(remaining // 60)
+                        s = int(remaining % 60)
+                        eta_text = f" | 약 {m}분 {s}초 남음"
+                        overlay_text = f"검색 중... {percent}%\n약 {m}분 {s}초 남음"
+                    else:
+                        eta_text = f" | 약 {int(remaining)}초 남음"
+                        overlay_text = f"검색 중... {percent}%\n약 {int(remaining)}초 남음"
+                else:
+                    eta_text = " | 계산 중..."
+                    overlay_text = f"검색 중... {percent}%\n계산 중..."
+            elif ratio >= 1.0:
+                elapsed = now - self._search_start_time
+                if elapsed >= 60:
+                    m = int(elapsed // 60)
+                    s = int(elapsed % 60)
+                    eta_text = f" | 완료 (소요 {m}분 {s}초)"
+                else:
+                    eta_text = f" | 완료 (소요 {int(elapsed)}초)"
+                overlay_text = ""
+            else:
+                eta_text = " | 계산 중..."
+                overlay_text = "검색 준비 중..."
 
         self.progress_bar.set(ratio)
         self.progress_label.configure(
-            text=f"진행: {percent}% ({done:,}/{total:,}파일)",
+            text=f"진행: {percent}% ({done:,}/{total:,}파일){eta_text}",
         )
+
+        # 오버레이 표시/숨김
+        if overlay_text:
+            self._overlay_label.configure(text=f"  {overlay_text}  ")
+            self._overlay_label.place(relx=0.5, rely=0.4, anchor="center")
+            self._overlay_label.lift()
+        else:
+            self._overlay_label.place_forget()
 
     def _get_keywords(self) -> list[str]:
         items = self.keyword_listbox.get(0, tk.END)
@@ -1064,11 +1102,7 @@ class FileScannerApp(ctk.CTk):
         self._refresh_summary_text()
 
     def _build_tree_row(
-        self,
-        keyword: str,
-        file_path: str,
-        location: str,
-        context: str,
+        self, keyword: str, file_path: str, location: str, context: str,
         tags: tuple[str, ...] = (),
     ) -> dict[str, object]:
         normalized_file_path = str(file_path)
@@ -1091,8 +1125,7 @@ class FileScannerApp(ctk.CTk):
 
     def _insert_tree_row(self, row: dict[str, object]) -> None:
         self.result_tree.insert(
-            "",
-            tk.END,
+            "", tk.END,
             values=(
                 str(row.get("keyword", "")),
                 str(row.get("filename", "")),
@@ -1199,24 +1232,16 @@ class FileScannerApp(ctk.CTk):
         popup.configure(bg="#ffffff")
 
         container = tk.Frame(
-            popup,
-            bg="#ffffff",
-            bd=0,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground="#d1d5db",
+            popup, bg="#ffffff", bd=0, relief="flat",
+            highlightthickness=1, highlightbackground="#d1d5db",
         )
         container.pack(fill="both", expand=True)
 
         title_label = tk.Label(
-            container,
-            text=f"{title} 필터",
-            bg="#ffffff",
-            fg="#1f2937",
+            container, text=f"{title} 필터",
+            bg="#ffffff", fg="#1f2937",
             font=("맑은 고딕", 12, "bold"),
-            anchor="w",
-            padx=10,
-            pady=8,
+            anchor="w", padx=10, pady=8,
         )
         title_label.pack(fill="x")
 
@@ -1247,21 +1272,13 @@ class FileScannerApp(ctk.CTk):
             apply_selection()
 
         all_checkbox = tk.Checkbutton(
-            container,
-            text="전체",
-            variable=all_var,
+            container, text="전체", variable=all_var,
             command=on_toggle_all,
-            bg="#ffffff",
-            fg="#1f2937",
-            font=("맑은 고딕", 12),
-            selectcolor="#ffffff",
-            activebackground="#f3f4f6",
-            activeforeground="#1f2937",
-            anchor="w",
-            padx=10,
-            pady=3,
-            relief="flat",
-            highlightthickness=0,
+            bg="#ffffff", fg="#1f2937",
+            font=("맑은 고딕", 12), selectcolor="#ffffff",
+            activebackground="#f3f4f6", activeforeground="#1f2937",
+            anchor="w", padx=10, pady=3,
+            relief="flat", highlightthickness=0,
         )
         all_checkbox.pack(fill="x")
 
@@ -1272,41 +1289,28 @@ class FileScannerApp(ctk.CTk):
                 checkbox = tk.Checkbutton(
                     container,
                     text=self._format_filter_value(target, value),
-                    variable=item_var,
-                    command=on_toggle_item,
-                    bg="#ffffff",
-                    fg="#374151",
-                    font=("맑은 고딕", 12),
-                    selectcolor="#ffffff",
-                    activebackground="#f3f4f6",
-                    activeforeground="#374151",
-                    anchor="w",
-                    padx=22,
-                    pady=3,
-                    relief="flat",
-                    highlightthickness=0,
+                    variable=item_var, command=on_toggle_item,
+                    bg="#ffffff", fg="#374151",
+                    font=("맑은 고딕", 12), selectcolor="#ffffff",
+                    activebackground="#f3f4f6", activeforeground="#374151",
+                    anchor="w", padx=22, pady=3,
+                    relief="flat", highlightthickness=0,
                 )
                 checkbox.pack(fill="x")
         else:
             empty_label = tk.Label(
-                container,
-                text="필터 대상이 없습니다",
-                bg="#ffffff",
-                fg="#9ca3af",
+                container, text="필터 대상이 없습니다",
+                bg="#ffffff", fg="#9ca3af",
                 font=("맑은 고딕", 11),
-                anchor="w",
-                padx=10,
-                pady=8,
+                anchor="w", padx=10, pady=8,
             )
             empty_label.pack(fill="x")
             all_checkbox.configure(state="disabled")
 
-        # 포커스가 팝업 외부로 이동했을 때만 닫기
         def _on_popup_focus_out(event: tk.Event) -> None:
             try:
                 focus_widget = popup.focus_get()
                 if focus_widget is not None:
-                    # 포커스가 팝업 내부 위젯이면 닫지 않음
                     widget_path = str(focus_widget)
                     popup_path = str(popup)
                     if widget_path == popup_path or widget_path.startswith(
@@ -1438,27 +1442,18 @@ class FileScannerApp(ctk.CTk):
             pass
         style.configure(
             "Result.Treeview",
-            background="#ffffff",
-            foreground="#1f2937",
-            fieldbackground="#ffffff",
-            rowheight=28,
+            background="#ffffff", foreground="#1f2937",
+            fieldbackground="#ffffff", rowheight=28,
             font=("맑은 고딕", 11),
-            bordercolor="#e5e7eb",
-            lightcolor="#e5e7eb",
-            darkcolor="#e5e7eb",
-            borderwidth=1,
-            relief="solid",
+            bordercolor="#e5e7eb", lightcolor="#e5e7eb", darkcolor="#e5e7eb",
+            borderwidth=1, relief="solid",
         )
         style.configure(
             "Result.Treeview.Heading",
-            background="#f3f4f6",
-            foreground="#374151",
+            background="#f3f4f6", foreground="#374151",
             font=("맑은 고딕", 12, "bold"),
-            bordercolor="#d1d5db",
-            lightcolor="#d1d5db",
-            darkcolor="#d1d5db",
-            borderwidth=1,
-            relief="raised",
+            bordercolor="#d1d5db", lightcolor="#d1d5db", darkcolor="#d1d5db",
+            borderwidth=1, relief="raised",
         )
         style.map(
             "Result.Treeview",
@@ -1483,7 +1478,6 @@ class FileScannerApp(ctk.CTk):
     @staticmethod
     def _resource_path(relative_path: str) -> str:
         import sys
-
         try:
             base = sys._MEIPASS
         except AttributeError:
