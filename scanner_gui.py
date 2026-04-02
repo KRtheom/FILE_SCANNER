@@ -282,16 +282,19 @@ class FileScannerApp(ctk.CTk):
 
 
         cols = [
-            ("keyword", "키워드", 80, False, self._show_kw_filter),
-            ("filename", "파일명 ↕", 180, False, lambda: self._sort("filename")),
-            ("extension", "확장자", 70, False, self._show_ext_filter),
-            ("filepath", "파일경로 ↕", 250, False, lambda: self._sort("filepath")),
-            ("location", "위치 ↕", 80, False, lambda: self._sort("location")),
-            ("context", "해당 문장 ↕", 350, True, lambda: self._sort("context")),
+            ("keyword", "키워드 ↕", 80, False),
+            ("filename", "파일명 ↕", 180, False),
+            ("extension", "확장자 ↕", 70, False),
+            ("filepath", "파일경로 ↕", 250, False),
+            ("location", "위치 ↕", 80, False),
+            ("context", "해당 문장 ↕", 350, True),
         ]
-        for cid, text, w, stretch, cmd in cols:
-            self.tree.heading(cid, text=text, command=cmd)
+        for cid, text, w, stretch in cols:
+            self.tree.heading(cid, text=text, command=lambda c=cid: self._sort(c))
             self.tree.column(cid, width=w, minwidth=w, anchor="w", stretch=stretch)
+
+        # 헤더 우클릭 → 필터 팝업
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
         self.tree.heading("fullpath", text="전체경로")
         self.tree.column("fullpath", width=0, minwidth=0, stretch=False)
         self.tree.tag_configure("fail", foreground="#dc2626")
@@ -307,7 +310,7 @@ class FileScannerApp(ctk.CTk):
         self.ctx_menu.add_command(label="경로 열기", command=self._open_folder)
         self.ctx_menu.add_command(label="경로 복사", command=self._copy_path)
         self.tree.bind("<Double-1>", self._on_dbl_click)
-        self.tree.bind("<Button-3>", self._on_right_click)
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
 
         self.summary_lbl = ctk.CTkLabel(
             p, text="", font=self._summary_font, anchor="w", text_color="#6b7280",
@@ -702,12 +705,26 @@ class FileScannerApp(ctk.CTk):
         self._sort_state[col] = asc
         key = self._COL_KEY.get(col, col)
         self._all_results.sort(key=lambda r: str(r.get(key, "")).lower(), reverse=not asc)
-        names = {"filename": "파일명", "filepath": "파일경로",
+        names = {"keyword": "키워드", "filename": "파일명",
+                 "extension": "확장자", "filepath": "파일경로",
                  "location": "위치", "context": "해당 문장"}
         for c, base in names.items():
             arr = " ↑" if c == col and asc else " ↓" if c == col else " ↕"
             self.tree.heading(c, text=f"{base}{arr}")
         self._apply_filters()
+
+    def _on_tree_right_click(self, event: tk.Event) -> None:
+        """트리뷰 우클릭: 헤더 → 필터 팝업, 행 → 컨텍스트 메뉴."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            col_id = self.tree.identify_column(event.x)
+            col_name = self.tree.column(col_id, option="id")
+            if col_name == "keyword":
+                self._show_kw_filter()
+            elif col_name == "extension":
+                self._show_ext_filter()
+        else:
+            self._on_right_click(event)    
 
     # ──────────────────────────────────────────
     # 필터 팝업
