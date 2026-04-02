@@ -51,7 +51,7 @@ _HELP_TEXTS: dict[str, str] = {
     ),
 }
 
-_UI_BATCH_INTERVAL_MS = 500
+_UI_BATCH_INTERVAL_MS = 2000
 _UI_BATCH_MAX_ROWS = 20
 
 
@@ -1050,11 +1050,14 @@ class FileScannerApp(ctk.CTk):
 
         # 오버레이 표시/숨김
         if overlay_text:
-            self._overlay_label.configure(text=f"  {overlay_text}  ")
-            self._overlay_label.place(relx=0.5, rely=0.4, anchor="center")
-            self._overlay_label.lift()
+            if self._overlay_label.cget("text") != f"  {overlay_text}  ":
+                self._overlay_label.configure(text=f"  {overlay_text}  ")
+            if not self._overlay_label.winfo_ismapped():
+                self._overlay_label.place(relx=0.5, rely=0.4, anchor="center")
+                self._overlay_label.lift()
         else:
-            self._overlay_label.place_forget()
+            if self._overlay_label.winfo_ismapped():
+                self._overlay_label.place_forget()
 
     def _get_keywords(self) -> list[str]:
         items = self.keyword_listbox.get(0, tk.END)
