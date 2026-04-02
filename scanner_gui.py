@@ -484,15 +484,7 @@ class FileScannerApp(ctk.CTk):
         )
         self.result_tree.grid(row=0, column=0, sticky="nsew")
 
-        # ── 검색 진행 오버레이 ──
-        self._overlay_label = ctk.CTkLabel(
-            tree_frame,
-            text="",
-            font=ctk.CTkFont(family="맑은 고딕", size=20, weight="bold"),
-            text_color="#374151",
-            fg_color="#ffffff",
-            corner_radius=12,
-        )
+        # 오버레이 제거됨
 
      
         self.result_tree.heading(
@@ -731,9 +723,7 @@ class FileScannerApp(ctk.CTk):
         self._is_searching = True
         self._search_start_time = time.time()
         self._progress_history.clear()
-        self._overlay_label.configure(text="파일 목록 수집 중...")
-        self._overlay_label.place(relx=0.5, rely=0.4, anchor="center")
-        self._overlay_label.lift()
+        # 오버레이 제거됨
         self._fail_count = 0
         self._skip_count = 0
         self._sort_state.clear()
@@ -929,7 +919,7 @@ class FileScannerApp(ctk.CTk):
 
     def _on_search_worker_done(self, summary: str) -> None:
         self._is_searching = False
-        self._overlay_label.place_forget()
+        # 오버레이 제거됨
         self._search_start_time: float = 0.0
         self._stop_batch_timer()
         self._flush_ui_queue()
@@ -977,7 +967,6 @@ class FileScannerApp(ctk.CTk):
             ratio = 0.0
             percent = 0
             eta_text = ""
-            overlay_text = ""
         else:
             ratio = min(1.0, max(0.0, done / total))
             percent = int(ratio * 100)
@@ -997,13 +986,10 @@ class FileScannerApp(ctk.CTk):
                         m = int(remaining // 60)
                         s = int(remaining % 60)
                         eta_text = f" | 약 {m}분 {s}초 남음"
-                        overlay_text = f"검색 중... {percent}%\n약 {m}분 {s}초 남음"
                     else:
                         eta_text = f" | 약 {int(remaining)}초 남음"
-                        overlay_text = f"검색 중... {percent}%\n약 {int(remaining)}초 남음"
                 else:
                     eta_text = " | 계산 중..."
-                    overlay_text = f"검색 중... {percent}%\n계산 중..."
             elif ratio >= 1.0:
                 elapsed = now - self._search_start_time
                 if elapsed >= 60:
@@ -1012,27 +998,14 @@ class FileScannerApp(ctk.CTk):
                     eta_text = f" | 완료 (소요 {m}분 {s}초)"
                 else:
                     eta_text = f" | 완료 (소요 {int(elapsed)}초)"
-                overlay_text = ""
             else:
                 eta_text = " | 계산 중..."
-                overlay_text = "검색 준비 중..."
 
         self.progress_bar.set(ratio)
         self.progress_label.configure(
             text=f"진행: {percent}% ({done:,}/{total:,}파일)",
         )
-
-        # 오버레이 표시/숨김
-        if overlay_text:
-            if self._overlay_label.cget("text") != f"  {overlay_text}  ":
-                self._overlay_label.configure(text=f"  {overlay_text}  ")
-            if not self._overlay_label.winfo_ismapped():
-                self._overlay_label.place(relx=0.5, rely=0.4, anchor="center")
-                self._overlay_label.lift()
-        else:
-            if self._overlay_label.winfo_ismapped():
-                self._overlay_label.place_forget()
-
+        
     def _get_keywords(self) -> list[str]:
         items = self.keyword_listbox.get(0, tk.END)
         return [str(item).strip() for item in items if str(item).strip()]
