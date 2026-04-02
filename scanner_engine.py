@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 import os
 import re
+import sys
+import contextlib
 import threading
 import warnings
 import xml.etree.ElementTree as ET
@@ -51,81 +54,76 @@ logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
 # 서드파티 라이브러리 경고 억제
-# xlrd, olefile 등이 콘솔에 대량 WARNING을 출력하면
-# I/O 블로킹으로 워커 스레드가 멈추는 원인이 된다.
 # ──────────────────────────────────────────────
 for _noisy in ("xlrd", "olefile", "openpyxl"):
     logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
-# xlrd는 logging 외에 print/warnings로도 출력한다
 warnings.filterwarnings("ignore", module=r"xlrd\..*")
 warnings.filterwarnings("ignore", module=r"olefile\..*")
 
 
+# ──────────────────────────────────────────────
+# 상수
+# ──────────────────────────────────────────────
+
 DEFAULT_EXTENSIONS: set[str] = {
-    ".pdf",
-    ".xlsx",
-    ".xls",
-    ".docx",
-    ".doc",
-    ".hwp",
-    ".hwpx",
-    ".csv",
-    ".txt",
+    ".pdf", ".xlsx", ".xls", ".docx", ".doc",
+    ".hwp", ".hwpx", ".csv", ".txt",
 }
 
 EXCLUDED_DIR_NAMES: set[str] = {
-    "windows",
-    "program files",
-    "program files (x86)",
-    "$recycle.bin",
-    "system volume information",
-    "programdata",
-    "appdata",
-    "venv",
-    "node_modules",
-    ".git",
-    "__pycache__",
-    "dist",
-    "build",
+    "windows", "program files", "program files (x86)",
+    "$recycle.bin", "system volume information",
+    "programdata", "appdata", "venv", "node_modules",
+    ".git", "__pycache__", "dist", "build",
 }
 
 TXT_FALLBACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "mbcs")
 QUICK_CHECK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "utf-16-le")
-QUICK_CHECK_MAX_BYTES = 100 * 1024 * 1024
+QUICK_CHECK_MAX_BYTES: int = 100 * 1024 * 1024
+
+# DOC/HWP 바이너리 폴백 시 읽어들일 최대 바이트 수
+BINARY_FALLBACK_MAX_BYTES: int = 10 * 1024 * 1024
+
+# ThreadPoolExecutor 워커 수
+MIN_WORKERS: int = 2
+MAX_WORKERS: int = 8
+CPU_DIVISOR: int = 2
 
 _SEARCH_FILE_META: dict[str, tuple[bool, bool]] = {}
 _SEARCH_FILE_META_LOCK = threading.Lock()
 
 
 # ──────────────────────────────────────────────
-# stdout/stderr 억제 컨텍스트 매니저
-# xlrd 일부 버전은 print()로 직접 출력한다
+# stdout/stderr 억제 — 스레드 안전 버전
 # ──────────────────────────────────────────────
-import io
-import sys
-import contextlib
+
+_suppress_lock = threading.Lock()
 
 
 @contextlib.contextmanager
 def _suppress_stdout_stderr():
-    """stdout/stderr 출력을 임시로 /dev/null 로 보낸다."""
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    try:
-        sys.stdout = io.StringIO()
-        sys.stderr = io.StringIO()
-        yield
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
+    """stdout/stderr 출력을 임시로 억제한다 (Lock으로 스레드 안전 보장)."""
+    with _suppress_lock:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        try:
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
 
 # ──────────────────────────────────────────────
 # 파일 탐색
 # ──────────────────────────────────────────────
 
-def scan_files(paths: list[str], extensions: set[str] | None = DEFAULT_EXTENSIONS) -> list[str]:
+def scan_files(
+    paths: list[str],
+    extensions: set[str] | None = DEFAULT_EXTENSIONS,
+) -> list[str]:
     """지정 경로를 재귀 탐색해 대상 확장자 파일의 절대경로 목록을 반환한다."""
     if not paths:
         return []
@@ -274,7 +272,9 @@ def search_file(filepath: str, keywords: list[str]) -> list[dict[str, str]]:
                     }
                 )
 
-        remaining_keywords = [kw for kw in normalized_keywords if kw.lower() not in found_in_filename]
+        remaining_keywords = [
+            kw for kw in normalized_keywords if kw.lower() not in found_in_filename
+        ]
         if not remaining_keywords:
             return results
 
@@ -282,8 +282,9 @@ def search_file(filepath: str, keywords: list[str]) -> list[dict[str, str]]:
             skipped = True
             return results
 
-        text_items, failed = _extract_text_with_status(filepath)
-        if failed:
+        text_items, extract_failed = _extract_text_with_status(filepath)
+        if extract_failed:
+            failed = True
             return results
 
         body_matches = search_keywords(text_items, remaining_keywords)
@@ -329,7 +330,10 @@ def search_file_by_name(filepath: str, keywords: list[str]) -> list[dict[str, st
     return matches
 
 
-def search_keywords(text_items: Iterable[tuple[str, str]], keywords: list[str]) -> list[dict[str, str]]:
+def search_keywords(
+    text_items: Iterable[tuple[str, str]],
+    keywords: list[str],
+) -> list[dict[str, str]]:
     """텍스트 목록에서 키워드를 검색해 위치와 문맥 정보를 반환한다."""
     normalized_keywords = _normalize_keyword_list(keywords)
     if not normalized_keywords:
@@ -384,8 +388,14 @@ def consume_search_file_meta(filepath: str) -> dict[str, bool]:
     return {"skipped": skipped, "failed": failed}
 
 
+def clear_all_search_file_meta() -> None:
+    """내부 메타 저장소를 완전히 비운다 (검색 종료/중단 시 호출)."""
+    with _SEARCH_FILE_META_LOCK:
+        _SEARCH_FILE_META.clear()
+
+
 # ──────────────────────────────────────────────
-# 리포트 저장 (사용자 수동 실행만)
+# 리포트 저장
 # ──────────────────────────────────────────────
 
 def save_report(results: list[dict[str, Any]], output_path: str) -> None:
@@ -427,29 +437,26 @@ def _extract_text_with_status(filepath: str) -> tuple[list[tuple[str, str]], boo
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
 
+    extractors: dict[str, Callable[[str], list[tuple[str, str]]]] = {
+        ".pdf": _extract_pdf,
+        ".xlsx": _extract_xlsx,
+        ".xls": _extract_xls,
+        ".docx": _extract_docx,
+        ".doc": _extract_doc,
+        ".hwp": _extract_hwp,
+        ".hwpx": _extract_hwpx,
+        ".csv": _extract_csv,
+        ".txt": _extract_txt,
+    }
+
+    extractor = extractors.get(ext)
+    if extractor is None:
+        return [], False
+
     try:
-        if ext == ".pdf":
-            return _extract_pdf(filepath), False
-        if ext == ".xlsx":
-            return _extract_xlsx(filepath), False
-        if ext == ".xls":
-            return _extract_xls(filepath), False
-        if ext == ".docx":
-            return _extract_docx(filepath), False
-        if ext == ".doc":
-            return _extract_doc(filepath), False
-        if ext == ".hwp":
-            return _extract_hwp(filepath), False
-        if ext == ".hwpx":
-            return _extract_hwpx(filepath), False
-        if ext == ".csv":
-            return _extract_csv(filepath), False
-        if ext == ".txt":
-            return _extract_txt(filepath), False
+        return extractor(filepath), False
     except Exception:
         return [], True
-
-    return [], False
 
 
 def _extract_pdf(filepath: str) -> list[tuple[str, str]]:
@@ -512,7 +519,6 @@ def _extract_xls(filepath: str) -> list[tuple[str, str]]:
 
     items: list[tuple[str, str]] = []
 
-    # xlrd 는 logging + print + warnings 세 경로로 모두 출력한다
     with _suppress_stdout_stderr():
         workbook = xlrd.open_workbook(filepath, on_demand=True, logfile=io.StringIO())
 
@@ -525,7 +531,9 @@ def _extract_xls(filepath: str) -> list[tuple[str, str]]:
                         continue
                     text = str(value).strip()
                     if text:
-                        items.append((f"{sheet.name} R{row_idx + 1}C{col_idx + 1}", text))
+                        items.append(
+                            (f"{sheet.name} R{row_idx + 1}C{col_idx + 1}", text)
+                        )
     finally:
         try:
             workbook.release_resources()
@@ -565,6 +573,10 @@ def _extract_doc(filepath: str) -> list[tuple[str, str]]:
                 raw = ole.openstream("WordDocument").read()
             except OSError:
                 return []
+
+            # 대용량 바이너리 폴백 제한
+            if len(raw) > BINARY_FALLBACK_MAX_BYTES:
+                raw = raw[:BINARY_FALLBACK_MAX_BYTES]
 
             candidates = _extract_doc_text_candidates(raw)
             for line_no, text in enumerate(candidates, start=1):
@@ -639,7 +651,7 @@ def _extract_hwp_binary_fallback(filepath: str) -> list[tuple[str, str]]:
     seen: set[str] = set()
 
     with open(filepath, "rb") as f:
-        raw = f.read()
+        raw = f.read(BINARY_FALLBACK_MAX_BYTES)
 
     line_no = 1
     for encoding in ("utf-16le", "cp949", "utf-8"):
@@ -746,7 +758,9 @@ def _extract_hwpx(filepath: str) -> list[tuple[str, str]]:
             if name.lower().endswith(".xml") and "section" in name.lower()
         ]
         if not xml_files:
-            xml_files = [name for name in archive.namelist() if name.lower().endswith(".xml")]
+            xml_files = [
+                name for name in archive.namelist() if name.lower().endswith(".xml")
+            ]
 
         for xml_name in sorted(xml_files):
             try:
@@ -825,7 +839,9 @@ def _build_quick_check_patterns(keywords: list[str]) -> list[bytes]:
     for keyword in keywords:
         has_alpha = any(c.isascii() and c.isalpha() for c in keyword)
         if has_alpha:
-            text_variants = [keyword, keyword.lower(), keyword.upper()]
+            text_variants = [
+                keyword, keyword.lower(), keyword.upper(), keyword.title(),
+            ]
         else:
             text_variants = [keyword]
 
@@ -875,7 +891,8 @@ def _is_excluded_dir(dir_name: str) -> bool:
 
 
 def _is_temp_file(filename: str) -> bool:
-    return filename.startswith("~$") or filename.startswith("~")
+    """Office 임시 파일(~$...)만 제외한다."""
+    return filename.startswith("~$")
 
 
 def _is_hwp_compressed(ole: Any) -> bool:
@@ -893,7 +910,11 @@ def _is_hwp_compressed(ole: Any) -> bool:
 def _iter_hwp_section_streams(ole: Any) -> list[str]:
     stream_names: list[str] = []
     for path_parts in ole.listdir(streams=True, storages=False):
-        if len(path_parts) >= 2 and path_parts[0] == "BodyText" and path_parts[1].startswith("Section"):
+        if (
+            len(path_parts) >= 2
+            and path_parts[0] == "BodyText"
+            and path_parts[1].startswith("Section")
+        ):
             stream_names.append("/".join(path_parts))
     return stream_names
 
@@ -917,7 +938,9 @@ def _parse_hwp_para_text(data: bytes) -> list[str]:
     data_len = len(data)
 
     while offset + 4 <= data_len:
-        header = int.from_bytes(data[offset : offset + 4], byteorder="little", signed=False)
+        header = int.from_bytes(
+            data[offset : offset + 4], byteorder="little", signed=False
+        )
         offset += 4
 
         record_type = header & 0x3FF
@@ -926,7 +949,9 @@ def _parse_hwp_para_text(data: bytes) -> list[str]:
         if record_size == 0xFFF:
             if offset + 4 > data_len:
                 break
-            record_size = int.from_bytes(data[offset : offset + 4], byteorder="little", signed=False)
+            record_size = int.from_bytes(
+                data[offset : offset + 4], byteorder="little", signed=False
+            )
             offset += 4
 
         end_offset = offset + record_size
