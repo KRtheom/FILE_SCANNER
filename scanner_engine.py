@@ -80,12 +80,12 @@ EXCLUDED_DIR_NAMES: set[str] = {
 
 TXT_FALLBACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "mbcs")
 QUICK_CHECK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "utf-16-le")
-QUICK_CHECK_MAX_BYTES: int = 100 * 1024 * 1024
+QUICK_CHECK_MAX_BYTES: int = 10 * 1024 * 1024
 
 BINARY_FALLBACK_MAX_BYTES: int = 10 * 1024 * 1024
 MAX_EXTRACT_FILE_SIZE: int = 50 * 1024 * 1024
-MAX_PDF_PAGES: int = 500
-FILE_PROCESS_TIMEOUT: int = 30
+MAX_PDF_PAGES: int = 200
+FILE_PROCESS_TIMEOUT: int = 15
 
 MIN_WORKERS: int = 4
 MAX_WORKERS: int = 8
