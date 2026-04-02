@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import logging
 import os
 import re
-import sys
-import contextlib
 import threading
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Callable, Iterable
 
