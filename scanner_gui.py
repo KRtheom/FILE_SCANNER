@@ -55,6 +55,27 @@ _UI_BATCH_INTERVAL_MS = 2000
 _UI_BATCH_MAX_ROWS = 20
 
 
+
+def _build_tree_row_static(
+    keyword: str, file_path: str, location: str, context: str,
+    tags: tuple[str, ...] = (),
+) -> dict[str, object]:
+    normalized_file_path = str(file_path)
+    filename = os.path.basename(normalized_file_path) or normalized_file_path
+    extension = os.path.splitext(normalized_file_path)[1].lower()
+    folder_path = os.path.dirname(normalized_file_path)
+    table_context = (str(context).replace("\n", " ").strip()[:80]) if context else ""
+    return {
+        "keyword": str(keyword),
+        "filename": filename,
+        "extension": extension,
+        "filepath_display": folder_path,
+        "location": str(location),
+        "context_display": table_context,
+        "fullpath": normalized_file_path,
+        "tags": tuple(tags),
+    }
+
 class FileScannerApp(ctk.CTk):
     """키워드 기반 문서 검색 GUI를 제공하는 메인 윈도우."""
 
@@ -122,7 +143,7 @@ class FileScannerApp(ctk.CTk):
 
     def _enqueue_result(self, result: dict) -> None:
         self._all_results.append(
-            self._build_tree_row(
+            _build_tree_row_static(
                 str(result.get("keyword", "")),
                 str(result.get("file_path", "")),
                 str(result.get("location", "")),
@@ -132,7 +153,7 @@ class FileScannerApp(ctk.CTk):
 
     def _enqueue_fail(self, file_path: str, error_message: str) -> None:
         self._all_results.append(
-            self._build_tree_row(
+            _build_tree_row_static(
                 "실패", str(file_path), "-",
                 str(error_message), tags=("fail",),
             )
@@ -153,13 +174,15 @@ class FileScannerApp(ctk.CTk):
             self._batch_after_id = None
 
     def _process_ui_queue(self) -> None:
-        """메인 스레드에서 진행률만 갱신한다."""
+        """메인 스레드에서 진행률과 건수만 갱신한다."""
         last_progress = None
-        while True:
+        count = 0
+        while count < 50:
             try:
                 item = self._ui_queue.get_nowait()
             except queue.Empty:
                 break
+            count += 1
             if item.get("type") == "progress":
                 last_progress = item
 
@@ -167,10 +190,7 @@ class FileScannerApp(ctk.CTk):
             self._update_progress(last_progress["done"], last_progress["total"])
 
         total = len(self._all_results)
-        if self._base_summary_text:
-            new_text = f"{self._base_summary_text} | 수집 {total:,}건"
-            if self.summary_label.cget("text") != new_text:
-                self.summary_label.configure(text=new_text)
+        self._set_summary_count(total)
 
         if self._is_searching or not self._ui_queue.empty():
             self._batch_after_id = self.after(
@@ -178,6 +198,15 @@ class FileScannerApp(ctk.CTk):
             )
         else:
             self._batch_after_id = None
+
+    def _set_summary_count(self, total: int) -> None:
+        """수집 건수만 빠르게 갱신한다."""
+        if not self._base_summary_text:
+            return
+        new_text = f"{self._base_summary_text} | 수집 {total:,}건"
+        current = self.summary_label.cget("text")
+        if current != new_text:
+            self.summary_label.configure(text=new_text)
 
 
     def _flush_ui_queue(self) -> None:
@@ -966,40 +995,9 @@ class FileScannerApp(ctk.CTk):
         if total <= 0:
             ratio = 0.0
             percent = 0
-            eta_text = ""
         else:
             ratio = min(1.0, max(0.0, done / total))
             percent = int(ratio * 100)
-            now = time.time()
-            self._progress_history.append((now, done))
-            if len(self._progress_history) > 100:
-                self._progress_history = self._progress_history[-100:]
-
-            if len(self._progress_history) >= 2 and ratio < 1.0:
-                oldest_time, oldest_done = self._progress_history[0]
-                dt = now - oldest_time
-                dd = done - oldest_done
-                if dd > 0 and dt > 0:
-                    speed = dd / dt
-                    remaining = (total - done) / speed
-                    if remaining >= 60:
-                        m = int(remaining // 60)
-                        s = int(remaining % 60)
-                        eta_text = f" | 약 {m}분 {s}초 남음"
-                    else:
-                        eta_text = f" | 약 {int(remaining)}초 남음"
-                else:
-                    eta_text = " | 계산 중..."
-            elif ratio >= 1.0:
-                elapsed = now - self._search_start_time
-                if elapsed >= 60:
-                    m = int(elapsed // 60)
-                    s = int(elapsed % 60)
-                    eta_text = f" | 완료 (소요 {m}분 {s}초)"
-                else:
-                    eta_text = f" | 완료 (소요 {int(elapsed)}초)"
-            else:
-                eta_text = " | 계산 중..."
 
         self.progress_bar.set(ratio)
         self.progress_label.configure(
