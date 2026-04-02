@@ -198,17 +198,18 @@ class FileScannerApp(ctk.CTk):
         self._flush_batch_insert()
 
     def _flush_batch_insert(self) -> None:
-        """트리뷰에 200건씩 나눠서 삽입한다."""
-        batch = 200
+        """트리뷰에 500건씩 나눠서 삽입한다."""
+        batch = 500
         end = min(self._flush_insert_index + batch, len(self._all_results))
         for i in range(self._flush_insert_index, end):
             row = self._all_results[i]
             if self._row_passes_filters(row):
                 self._insert_tree_row(row)
         self._flush_insert_index = end
-        self._refresh_summary_text()
         if self._flush_insert_index < len(self._all_results):
-            self.after(10, self._flush_batch_insert)
+            self.after(1, self._flush_batch_insert)
+        else:
+            self._refresh_summary_text()
 
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -903,7 +904,8 @@ class FileScannerApp(ctk.CTk):
                                 found_count += 1
                                 self._enqueue_result(result)
 
-                        self._enqueue_progress(completed_count, total_files)
+                        if completed_count % 100 == 0 or completed_count == total_files:
+                            self._enqueue_progress(completed_count, total_files)
 
         except Exception:
             self._fail_count += 1
