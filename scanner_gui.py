@@ -1045,7 +1045,7 @@ class FileScannerApp(ctk.CTk):
 
         self.progress_bar.set(ratio)
         self.progress_label.configure(
-            text=f"진행: {percent}% ({done:,}/{total:,}파일){eta_text}",
+            text=f"진행: {percent}% ({done:,}/{total:,}파일)",
         )
 
         # 오버레이 표시/숨김
