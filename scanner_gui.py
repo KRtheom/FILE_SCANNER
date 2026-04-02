@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import queue
 import subprocess
 import string
 import threading
@@ -47,16 +48,10 @@ _HELP_TEXTS: dict[str, str] = {
         "■ 화면 조작\n"
         "- 좌측/우측 패널 경계선 드래그: 패널 크기 조절"
     ),
-    "개인정보": (
-        "■ 개인정보 검색 (준비 중)\n\n"
-        "주민번호, 휴대폰, 카드번호, 운전면허, 여권번호\n"
-        "5개 패턴을 자동 검출합니다."
-    ),
-    "불법S/W파일": (
-        "■ 불법S/W파일 검색 (준비 중)\n\n"
-        "불법 소프트웨어 관련 파일을 탐지합니다."
-    ),
 }
+
+_UI_BATCH_INTERVAL_MS = 150
+_UI_BATCH_MAX_ROWS = 80
 
 
 class FileScannerApp(ctk.CTk):
@@ -66,6 +61,10 @@ class FileScannerApp(ctk.CTk):
         super().__init__()
 
         self.title("FILE SCANNER v1.0")
+        try:
+            self.iconbitmap(self._resource_path("app_icon.ico"))
+        except Exception:
+            pass
         self.geometry("1400x900")
         self.minsize(1100, 700)
         self.resizable(True, True)
@@ -90,6 +89,9 @@ class FileScannerApp(ctk.CTk):
         self._path_values: dict[str, str] = {}
         self._search_mode = tk.StringVar(value="content")
 
+        self._ui_queue: queue.Queue[dict[str, object]] = queue.Queue()
+        self._batch_after_id: str | None = None
+
         self._font = ctk.CTkFont(family="맑은 고딕", size=14, weight="bold")
         self._title_font = ctk.CTkFont(family="맑은 고딕", size=15, weight="bold")
         self._summary_font = ctk.CTkFont(family="맑은 고딕", size=13)
@@ -97,8 +99,94 @@ class FileScannerApp(ctk.CTk):
 
         self._build_ui()
         self._load_system_drives()
-        self._load_keywords()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 배치 UI 갱신
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _enqueue_result(self, result: dict) -> None:
+        self._ui_queue.put({"type": "result", "data": result})
+
+    def _enqueue_fail(self, file_path: str, error_message: str) -> None:
+        self._ui_queue.put({"type": "fail", "file_path": file_path, "error": error_message})
+
+    def _enqueue_progress(self, done: int, total: int) -> None:
+        self._ui_queue.put({"type": "progress", "done": done, "total": total})
+
+    def _start_batch_timer(self) -> None:
+        self._stop_batch_timer()
+        self._batch_after_id = self.after(_UI_BATCH_INTERVAL_MS, self._process_ui_queue)
+
+    def _stop_batch_timer(self) -> None:
+        if self._batch_after_id is not None:
+            self.after_cancel(self._batch_after_id)
+            self._batch_after_id = None
+
+    def _process_ui_queue(self) -> None:
+        """메인 스레드에서 일정 간격으로 큐를 꺼내 배치 처리한다."""
+        rows_processed = 0
+        last_progress: dict[str, object] | None = None
+        had_rows = False
+
+        while True:
+            try:
+                item = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            item_type = item.get("type")
+
+            if item_type == "progress":
+                last_progress = item
+            elif rows_processed < _UI_BATCH_MAX_ROWS:
+                if item_type == "result":
+                    self._insert_tree_result_from_result(item["data"])
+                    rows_processed += 1
+                    had_rows = True
+                elif item_type == "fail":
+                    self._insert_tree_fail(item["file_path"], item["error"])
+                    rows_processed += 1
+                    had_rows = True
+            else:
+                self._ui_queue.put(item)
+                break
+
+        if had_rows:
+            self._refresh_summary_text()
+
+        if last_progress is not None:
+            self._update_progress(last_progress["done"], last_progress["total"])
+
+        if self._is_searching or not self._ui_queue.empty():
+            self._batch_after_id = self.after(_UI_BATCH_INTERVAL_MS, self._process_ui_queue)
+        else:
+            self._batch_after_id = None
+
+    def _flush_ui_queue(self) -> None:
+        """검색 종료 시 큐에 남은 항목을 모두 처리한다."""
+        had_rows = False
+        while True:
+            try:
+                item = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            item_type = item.get("type")
+            if item_type == "result":
+                self._insert_tree_result_from_result(item["data"])
+                had_rows = True
+            elif item_type == "fail":
+                self._insert_tree_fail(item["file_path"], item["error"])
+                had_rows = True
+            elif item_type == "progress":
+                self._update_progress(item["done"], item["total"])
+
+        if had_rows:
+            self._refresh_summary_text()
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # UI 빌드
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _build_ui(self) -> None:
         self.configure(fg_color="#f0f2f5")
@@ -107,7 +195,6 @@ class FileScannerApp(ctk.CTk):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # ── 상단 탭 바 ──
         tab_bar = ctk.CTkFrame(self, fg_color="#ffffff", corner_radius=0, height=50)
         tab_bar.grid(row=0, column=0, sticky="ew")
         tab_bar.grid_propagate(False)
@@ -121,7 +208,7 @@ class FileScannerApp(ctk.CTk):
         self._tab_frames: dict[str, ctk.CTkFrame] = {}
         self._current_tab: str = ""
 
-        tab_names = ["파일/문서", "개인정보", "불법S/W파일"]
+        tab_names = ["파일/문서"]
         for col, name in enumerate(tab_names):
             btn = ctk.CTkButton(
                 tab_bar,
@@ -153,11 +240,9 @@ class FileScannerApp(ctk.CTk):
         )
         help_btn.grid(row=0, column=4, padx=(0, 16), sticky="e")
 
-        # 구분선
         separator = ctk.CTkFrame(self, fg_color="#e5e7eb", height=1, corner_radius=0)
         separator.grid(row=1, column=0, sticky="ew")
 
-        # ── 콘텐츠 영역 ──
         content_area = ctk.CTkFrame(self, fg_color="#f0f2f5", corner_radius=0)
         content_area.grid(row=2, column=0, padx=16, pady=(12, 16), sticky="nsew")
         content_area.grid_rowconfigure(0, weight=1)
@@ -166,14 +251,6 @@ class FileScannerApp(ctk.CTk):
         tab1 = ctk.CTkFrame(content_area, fg_color="#f0f2f5", corner_radius=0)
         self._tab_frames["파일/문서"] = tab1
         self._build_keyword_tab(tab1)
-
-        tab2 = ctk.CTkFrame(content_area, fg_color="#f0f2f5", corner_radius=0)
-        self._tab_frames["개인정보"] = tab2
-        self._build_placeholder_tab(tab2)
-
-        tab3 = ctk.CTkFrame(content_area, fg_color="#f0f2f5", corner_radius=0)
-        self._tab_frames["불법S/W파일"] = tab3
-        self._build_placeholder_tab(tab3)
 
         self._switch_tab("파일/문서")
 
@@ -192,17 +269,9 @@ class FileScannerApp(ctk.CTk):
 
         for btn_name, btn in self._tab_buttons.items():
             if btn_name == name:
-                btn.configure(
-                    fg_color="#e0edff",
-                    text_color="#1a56db",
-                    hover_color="#d0e3ff",
-                )
+                btn.configure(fg_color="#e0edff", text_color="#1a56db", hover_color="#d0e3ff")
             else:
-                btn.configure(
-                    fg_color="transparent",
-                    text_color="#5f6368",
-                    hover_color="#e8eaed",
-                )
+                btn.configure(fg_color="transparent", text_color="#5f6368", hover_color="#e8eaed")
 
         self._current_tab = name
 
@@ -210,29 +279,14 @@ class FileScannerApp(ctk.CTk):
         text = _HELP_TEXTS.get(self._current_tab, "도움말이 없습니다.")
         messagebox.showinfo(f"도움말 - {self._current_tab}", text)
 
-    def _build_placeholder_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_rowconfigure(0, weight=1)
-        tab.grid_columnconfigure(0, weight=1)
-        label = ctk.CTkLabel(
-            tab,
-            text="준비 중",
-            font=ctk.CTkFont(family="맑은 고딕", size=20),
-            text_color="#9ca3af",
-        )
-        label.grid(row=0, column=0, sticky="nsew")
-
     def _build_keyword_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_rowconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=0)
         tab.grid_columnconfigure(0, weight=1)
 
         paned = tk.PanedWindow(
-            tab,
-            orient=tk.HORIZONTAL,
-            sashwidth=6,
-            sashrelief="flat",
-            bg="#e5e7eb",
-            opaqueresize=True,
+            tab, orient=tk.HORIZONTAL, sashwidth=6, sashrelief="flat",
+            bg="#e5e7eb", opaqueresize=True,
         )
         paned.grid(row=0, column=0, sticky="nsew")
 
@@ -303,14 +357,10 @@ class FileScannerApp(ctk.CTk):
             font=("맑은 고딕", 13, "bold"),
             activestyle="none",
             height=10,
-            bg="#f9fafb",
-            fg="#1f2937",
-            selectbackground="#1a56db",
-            selectforeground="#ffffff",
-            highlightthickness=1,
-            highlightbackground="#d1d5db",
-            borderwidth=0,
-            relief="flat",
+            bg="#f9fafb", fg="#1f2937",
+            selectbackground="#1a56db", selectforeground="#ffffff",
+            highlightthickness=1, highlightbackground="#d1d5db",
+            borderwidth=0, relief="flat",
         )
         self.keyword_listbox.grid(row=0, column=0, sticky="nsew")
 
@@ -320,7 +370,7 @@ class FileScannerApp(ctk.CTk):
 
         button_row = ctk.CTkFrame(panel, fg_color="transparent")
         button_row.grid(row=6, column=0, padx=12, pady=(0, 10), sticky="ew")
-        for col in range(3):
+        for col in range(2):
             button_row.grid_columnconfigure(col, weight=1)
 
         add_button = ctk.CTkButton(
@@ -331,18 +381,11 @@ class FileScannerApp(ctk.CTk):
         add_button.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
         remove_button = ctk.CTkButton(
-            button_row, text="선택삭제", command=self._on_remove_keyword,
+            button_row, text="삭제", command=self._on_remove_keyword,
             font=self._font, height=30, corner_radius=6,
             fg_color="#e5e7eb", hover_color="#d1d5db", text_color="#374151",
         )
-        remove_button.grid(row=0, column=1, padx=4, sticky="ew")
-
-        save_button = ctk.CTkButton(
-            button_row, text="전체삭제", command=self._on_save_keywords,
-            font=self._font, height=30, corner_radius=6,
-            fg_color="#e5e7eb", hover_color="#d1d5db", text_color="#374151",
-        )
-        save_button.grid(row=0, column=2, padx=(4, 0), sticky="ew")
+        remove_button.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         search_mode_title = ctk.CTkLabel(
             panel, text="검색 범위", font=self._font,
@@ -465,20 +508,15 @@ class FileScannerApp(ctk.CTk):
         )
         self.save_report_button.grid(row=0, column=3, padx=(0, 12), pady=10)
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 데이터 / 이벤트
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     def _load_system_drives(self) -> None:
         for letter in string.ascii_uppercase:
             drive = f"{letter}:\\"
             if os.path.exists(drive):
                 self._add_path_option(drive, checked=False)
-
-    def _load_keywords(self) -> None:
-        try:
-            keywords = scanner_engine.load_keywords()
-        except Exception:
-            return
-
-        for keyword in keywords:
-            self._insert_keyword_if_new(keyword)
 
     def _on_add_folder(self) -> None:
         folder = filedialog.askdirectory()
@@ -509,7 +547,6 @@ class FileScannerApp(ctk.CTk):
         keyword = self.keyword_entry.get().strip()
         if self._insert_keyword_if_new(keyword):
             self.keyword_entry.delete(0, tk.END)
-            scanner_engine.save_keywords(self._get_keywords())
         return "break"
 
     def _insert_keyword_if_new(self, keyword: str) -> bool:
@@ -530,20 +567,11 @@ class FileScannerApp(ctk.CTk):
             return
         for index in reversed(selected):
             self.keyword_listbox.delete(index)
-        scanner_engine.save_keywords(self._get_keywords())
-
-    def _on_save_keywords(self) -> None:
-        if not messagebox.askyesno("확인", "키워드를 전체 삭제하시겠습니까?"):
-            return
-        self.keyword_listbox.delete(0, tk.END)
-        scanner_engine.save_keywords([])
-        self._set_summary_text("키워드 전체 삭제 완료")
 
     def _on_search_toggle(self) -> None:
         if self._is_searching:
             self._request_stop_search()
             return
-
         self._start_search()
 
     def _start_search(self) -> None:
@@ -569,6 +597,13 @@ class FileScannerApp(ctk.CTk):
         self._set_summary_text("검색 시작")
         self._update_progress(0, 0)
 
+        while not self._ui_queue.empty():
+            try:
+                self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._start_batch_timer()
+
         self._search_thread = threading.Thread(
             target=self._search_worker,
             args=(paths, keywords, search_mode),
@@ -586,6 +621,10 @@ class FileScannerApp(ctk.CTk):
                 except Exception:
                     pass
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 검색 워커
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     def _search_worker(self, paths: list[str], keywords: list[str], search_mode: str) -> None:
         start_time = time.perf_counter()
         found_count = 0
@@ -594,13 +633,20 @@ class FileScannerApp(ctk.CTk):
         files: list[str] = []
 
         try:
+            self._call_ui(self._set_summary_text, "파일 목록 수집 중...")
+
             if search_mode == "filename":
                 files = scanner_engine.scan_files(paths, extensions=None)
             else:
                 files = scanner_engine.scan_files(paths, extensions=scanner_engine.DEFAULT_EXTENSIONS)
             total_files = len(files)
+
+            if self._stop_flag:
+                return
+
             self._call_ui(self._set_summary_text, f"검색 중 | 대상 파일: {total_files:,}개")
-            self._call_ui(self._update_progress, 0, total_files)
+            self._enqueue_progress(0, total_files)
+
             if search_mode == "filename":
                 for index, file_path in enumerate(files, start=1):
                     if self._stop_flag:
@@ -616,7 +662,7 @@ class FileScannerApp(ctk.CTk):
                         error_message = "검색 처리 중 예외 발생"
 
                     if error_message:
-                        self._call_ui(self._insert_tree_fail, file_path, error_message)
+                        self._enqueue_fail(file_path, error_message)
 
                     if matches:
                         for match in matches:
@@ -629,74 +675,60 @@ class FileScannerApp(ctk.CTk):
                             }
                             self._results.append(result)
                             found_count += 1
-                            self._call_ui(self._insert_tree_result_from_result, result)
+                            self._enqueue_result(result)
 
-                    if index % 1000 == 0 or index == total_files:
-                        self._call_ui(self._update_progress, index, total_files)
+                    if index % 500 == 0 or index == total_files:
+                        self._enqueue_progress(index, total_files)
             else:
-                with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4) + 2)) as executor:
-
+                worker_count = min(8, max(2, (os.cpu_count() or 4) // 2))
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
                     self._executor = executor
                     future_to_file = {
                         executor.submit(scanner_engine.search_file, file_path, keywords): file_path
                         for file_path in files
                     }
-                    pending = set(future_to_file.keys())
 
-                    while pending:
+                    for future in as_completed(future_to_file):
                         if self._stop_flag:
                             executor.shutdown(wait=False, cancel_futures=True)
                             break
 
+                        file_path = future_to_file[future]
+                        completed_count += 1
+
                         try:
-                            completed = next(as_completed(pending, timeout=0.1))
-                            done_now = [completed]
-                        except FuturesTimeoutError:
-                            continue
+                            matches = future.result()
+                            error_message = ""
+                        except Exception:
+                            self._fail_count += 1
+                            matches = []
+                            error_message = "검색 처리 중 예외 발생"
 
-                        for future in done_now:
-                            if future in pending:
-                                pending.remove(future)
+                        meta = scanner_engine.consume_search_file_meta(file_path)
+                        if meta.get("skipped", False):
+                            self._skip_count += 1
+                        if meta.get("failed", False):
+                            self._fail_count += 1
+                            if not error_message:
+                                error_message = "텍스트 추출 실패"
 
-                            file_path = future_to_file[future]
-                            completed_count += 1
+                        if error_message:
+                            self._enqueue_fail(file_path, error_message)
 
-                            try:
-                                matches = future.result()
-                                error_message = ""
-                            except Exception:
-                                self._fail_count += 1
-                                matches = []
-                                error_message = "검색 처리 중 예외 발생"
+                        if matches:
+                            for match in matches:
+                                result = {
+                                    "keyword": match.get("keyword", ""),
+                                    "file_path": match.get("file", file_path),
+                                    "location": match.get("location", ""),
+                                    "context": match.get("context", ""),
+                                    "searched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                }
+                                self._results.append(result)
+                                found_count += 1
+                                self._enqueue_result(result)
 
-                            meta = scanner_engine.consume_search_file_meta(file_path)
-                            if meta.get("skipped", False):
-                                self._skip_count += 1
-                            if meta.get("failed", False):
-                                self._fail_count += 1
-                                if not error_message:
-                                    error_message = "텍스트 추출 실패"
-
-                            if error_message:
-                                self._call_ui(self._insert_tree_fail, file_path, error_message)
-
-                            if matches:
-                                for match in matches:
-                                    result = {
-                                        "keyword": match.get("keyword", ""),
-                                        "file_path": match.get("file", file_path),
-                                        "location": match.get("location", ""),
-                                        "context": match.get("context", ""),
-                                        "searched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    }
-                                    self._results.append(result)
-                                    found_count += 1
-                                    self._call_ui(self._insert_tree_result_from_result, result)
-
-                            self._call_ui(self._update_progress, completed_count, total_files)
-
-                    if self._stop_flag:
-                        executor.shutdown(wait=False, cancel_futures=True)
+                        self._enqueue_progress(completed_count, total_files)
 
         except Exception:
             self._fail_count += 1
@@ -713,8 +745,14 @@ class FileScannerApp(ctk.CTk):
                     f"검색 완료 | {total_files:,}개 스캔 | 스킵 {self._skip_count:,}개 | "
                     f"{found_count:,}건 발견 | 실패 {self._fail_count:,}개 | 소요시간: {elapsed:.1f}s"
                 )
-            self._call_ui(self._set_summary_text, summary)
-            self._call_ui(self._finish_search)
+            self._call_ui(self._on_search_worker_done, summary)
+
+    def _on_search_worker_done(self, summary: str) -> None:
+        self._is_searching = False
+        self._stop_batch_timer()
+        self._flush_ui_queue()
+        self._set_summary_text(summary)
+        self._finish_search()
 
     def _finish_search(self) -> None:
         self._is_searching = False
@@ -828,8 +866,7 @@ class FileScannerApp(ctk.CTk):
 
     def _insert_tree_row(self, row: dict[str, object]) -> None:
         self.result_tree.insert(
-            "",
-            tk.END,
+            "", tk.END,
             values=(
                 str(row.get("keyword", "")),
                 str(row.get("filename", "")),
@@ -862,7 +899,6 @@ class FileScannerApp(ctk.CTk):
 
         if self._row_passes_filters(row):
             self._insert_tree_row(row)
-        self._refresh_summary_text()
 
     def _apply_filters(self) -> None:
         self._clear_tree_widget()
@@ -873,7 +909,7 @@ class FileScannerApp(ctk.CTk):
 
     def _get_available_filter_values(self, target: str) -> list[str]:
         values = {str(row.get(target, "")) for row in self._all_results}
-        return sorted(values, key=lambda value: (value == "", value.lower()))
+        return sorted(values, key=lambda v: (v == "", v.lower()))
 
     def _format_filter_value(self, target: str, value: str) -> str:
         if target == "extension" and value == "":
@@ -883,10 +919,10 @@ class FileScannerApp(ctk.CTk):
     def _get_filter_popup_position(self, column_name: str) -> tuple[int, int]:
         display_columns = list(self.result_tree["displaycolumns"])
         offset_x = 0
-        for display_column in display_columns:
-            if display_column == column_name:
+        for dc in display_columns:
+            if dc == column_name:
                 break
-            offset_x += int(self.result_tree.column(display_column, "width"))
+            offset_x += int(self.result_tree.column(dc, "width"))
 
         root_x = self.result_tree.winfo_rootx()
         root_y = self.result_tree.winfo_rooty()
@@ -945,7 +981,7 @@ class FileScannerApp(ctk.CTk):
         item_vars: dict[str, tk.BooleanVar] = {}
 
         def apply_selection() -> None:
-            chosen = {value for value, var in item_vars.items() if var.get()}
+            chosen = {v for v, var in item_vars.items() if var.get()}
             all_selected = chosen == all_values
             if target == "keyword":
                 self._keyword_filter = chosen
@@ -962,7 +998,7 @@ class FileScannerApp(ctk.CTk):
             apply_selection()
 
         def on_toggle_item() -> None:
-            all_var.set(all(item.get() for item in item_vars.values()) if item_vars else False)
+            all_var.set(all(v.get() for v in item_vars.values()) if item_vars else False)
             apply_selection()
 
         all_checkbox = tk.Checkbutton(
@@ -1003,8 +1039,8 @@ class FileScannerApp(ctk.CTk):
             empty_label.pack(fill="x")
             all_checkbox.configure(state="disabled")
 
-        popup.bind("<FocusOut>", lambda _event: self._close_filter_popup())
-        popup.bind("<Escape>", lambda _event: self._close_filter_popup())
+        popup.bind("<FocusOut>", lambda _e: self._close_filter_popup())
+        popup.bind("<Escape>", lambda _e: self._close_filter_popup())
 
         x_pos, y_pos = self._get_filter_popup_position(column_name)
         popup.update_idletasks()
@@ -1078,8 +1114,7 @@ class FileScannerApp(ctk.CTk):
         if not file_path or not os.path.exists(file_path):
             messagebox.showwarning("경고", "파일을 찾을 수 없습니다")
             return
-        escaped = file_path.replace('"', '""')
-        subprocess.Popen(f'explorer /select,"{escaped}"')
+        subprocess.Popen(["explorer", "/select,", file_path])
 
     def _open_selected_file(self) -> None:
         selected = self.result_tree.selection()
@@ -1113,27 +1148,18 @@ class FileScannerApp(ctk.CTk):
             pass
         style.configure(
             "Result.Treeview",
-            background="#ffffff",
-            foreground="#1f2937",
-            fieldbackground="#ffffff",
-            rowheight=28,
+            background="#ffffff", foreground="#1f2937",
+            fieldbackground="#ffffff", rowheight=28,
             font=("맑은 고딕", 11),
-            bordercolor="#e5e7eb",
-            lightcolor="#e5e7eb",
-            darkcolor="#e5e7eb",
-            borderwidth=1,
-            relief="solid",
+            bordercolor="#e5e7eb", lightcolor="#e5e7eb", darkcolor="#e5e7eb",
+            borderwidth=1, relief="solid",
         )
         style.configure(
             "Result.Treeview.Heading",
-            background="#f3f4f6",
-            foreground="#374151",
+            background="#f3f4f6", foreground="#374151",
             font=("맑은 고딕", 12, "bold"),
-            bordercolor="#d1d5db",
-            lightcolor="#d1d5db",
-            darkcolor="#d1d5db",
-            borderwidth=1,
-            relief="raised",
+            bordercolor="#d1d5db", lightcolor="#d1d5db", darkcolor="#d1d5db",
+            borderwidth=1, relief="raised",
         )
         style.map(
             "Result.Treeview",
@@ -1153,9 +1179,24 @@ class FileScannerApp(ctk.CTk):
         except RuntimeError:
             return
 
+    @staticmethod
+    def _resource_path(relative_path: str) -> str:
+        import sys
+        try:
+            base = sys._MEIPASS
+        except AttributeError:
+            base = os.path.abspath(".")
+        return os.path.join(base, relative_path)
+
     def _on_close(self) -> None:
         self._stop_flag = True
+        self._stop_batch_timer()
         self._close_filter_popup()
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
         self.destroy()
 
 
