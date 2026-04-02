@@ -121,11 +121,21 @@ class FileScannerApp(ctk.CTk):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _enqueue_result(self, result: dict) -> None:
-        self._ui_queue.put({"type": "result", "data": result})
+        self._all_results.append(
+            self._build_tree_row(
+                str(result.get("keyword", "")),
+                str(result.get("file_path", "")),
+                str(result.get("location", "")),
+                str(result.get("context", "")).replace("\n", " ").strip(),
+            )
+        )
 
     def _enqueue_fail(self, file_path: str, error_message: str) -> None:
-        self._ui_queue.put(
-            {"type": "fail", "file_path": file_path, "error": error_message}
+        self._all_results.append(
+            self._build_tree_row(
+                "실패", str(file_path), "-",
+                str(error_message), tags=("fail",),
+            )
         )
 
     def _enqueue_progress(self, done: int, total: int) -> None:
@@ -143,46 +153,24 @@ class FileScannerApp(ctk.CTk):
             self._batch_after_id = None
 
     def _process_ui_queue(self) -> None:
-        """메인 스레드에서 일정 간격으로 큐를 꺼내 배치 처리한다."""
-        last_progress: dict[str, object] | None = None
-
-        count = 0
-        while count < 500:
+        """메인 스레드에서 진행률만 갱신한다."""
+        last_progress = None
+        while True:
             try:
                 item = self._ui_queue.get_nowait()
             except queue.Empty:
                 break
-            count += 1
-
-            item_type = item.get("type")
-
-            if item_type == "progress":
+            if item.get("type") == "progress":
                 last_progress = item
-            elif item_type == "result":
-                self._all_results.append(
-                    self._build_tree_row(
-                        str(item["data"].get("keyword", "")),
-                        str(item["data"].get("file_path", "")),
-                        str(item["data"].get("location", "")),
-                        str(item["data"].get("context", "")).replace("\n", " ").strip(),
-                    )
-                )
-            elif item_type == "fail":
-                self._all_results.append(
-                    self._build_tree_row(
-                        "실패", str(item["file_path"]), "-",
-                        str(item["error"]), tags=("fail",),
-                    )
-                )
 
         if last_progress is not None:
             self._update_progress(last_progress["done"], last_progress["total"])
 
         total = len(self._all_results)
         if self._base_summary_text:
-            self.summary_label.configure(
-                text=f"{self._base_summary_text} | 수집 {total:,}건",
-            )
+            new_text = f"{self._base_summary_text} | 수집 {total:,}건"
+            if self.summary_label.cget("text") != new_text:
+                self.summary_label.configure(text=new_text)
 
         if self._is_searching or not self._ui_queue.empty():
             self._batch_after_id = self.after(
@@ -191,31 +179,15 @@ class FileScannerApp(ctk.CTk):
         else:
             self._batch_after_id = None
 
+
     def _flush_ui_queue(self) -> None:
-        """검색 종료 시 큐에 남은 항목을 모두 처리하고 트리뷰에 일괄 삽입한다."""
+        """검색 종료 시 큐를 비우고 트리뷰에 배치 삽입 시작."""
         while True:
             try:
                 item = self._ui_queue.get_nowait()
             except queue.Empty:
                 break
-            item_type = item.get("type")
-            if item_type == "result":
-                self._all_results.append(
-                    self._build_tree_row(
-                        str(item["data"].get("keyword", "")),
-                        str(item["data"].get("file_path", "")),
-                        str(item["data"].get("location", "")),
-                        str(item["data"].get("context", "")).replace("\n", " ").strip(),
-                    )
-                )
-            elif item_type == "fail":
-                self._all_results.append(
-                    self._build_tree_row(
-                        "실패", str(item["file_path"]), "-",
-                        str(item["error"]), tags=("fail",),
-                    )
-                )
-            elif item_type == "progress":
+            if item.get("type") == "progress":
                 self._update_progress(item["done"], item["total"])
 
         for row in self._all_results:
