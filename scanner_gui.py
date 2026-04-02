@@ -604,6 +604,11 @@ class FileScannerApp(ctk.CTk):
             text=f"진행: {pct}% ({done:,}/{total:,}파일)"
         )
 
+        if not self._is_searching:
+            if self._overlay.winfo_ismapped():
+                self._overlay.place_forget()
+            return
+
         elapsed = time.time() - self._search_start
         if done > 0 and r < 1.0:
             remaining = (elapsed / done) * (total - done)
