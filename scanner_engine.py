@@ -53,7 +53,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-# 서드파티 라이브러리 경고 억제
+# 서드파티 라이브러리 경고 억제 (모듈 로드 시 1회)
 # ──────────────────────────────────────────────
 for _noisy in ("xlrd", "olefile", "openpyxl"):
     logging.getLogger(_noisy).setLevel(logging.CRITICAL)
@@ -93,28 +93,6 @@ CPU_DIVISOR: int = 2
 
 _SEARCH_FILE_META: dict[str, tuple[bool, bool]] = {}
 _SEARCH_FILE_META_LOCK = threading.Lock()
-
-
-# ──────────────────────────────────────────────
-# stdout/stderr 억제 — 스레드 안전 버전
-# ──────────────────────────────────────────────
-
-_suppress_lock = threading.Lock()
-
-
-@contextlib.contextmanager
-def _suppress_stdout_stderr():
-    """stdout/stderr 출력을 임시로 억제한다 (Lock으로 스레드 안전 보장)."""
-    with _suppress_lock:
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        try:
-            sys.stdout = io.StringIO()
-            sys.stderr = io.StringIO()
-            yield
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
 
 
 # ──────────────────────────────────────────────
@@ -435,7 +413,6 @@ def save_report(results: list[dict[str, Any]], output_path: str) -> None:
 # ──────────────────────────────────────────────
 
 def _extract_text_with_status(filepath: str) -> tuple[list[tuple[str, str]], bool]:
-    # 대용량 파일 사전 차단
     try:
         file_size = os.path.getsize(filepath)
         if file_size > MAX_EXTRACT_FILE_SIZE:
@@ -526,14 +503,11 @@ def _extract_xlsx(filepath: str) -> list[tuple[str, str]]:
 
 
 def _extract_xls(filepath: str) -> list[tuple[str, str]]:
-    """xls 파일 텍스트 추출."""
     if xlrd is None:
         raise RuntimeError("xlrd 미설치")
 
     items: list[tuple[str, str]] = []
-
-    with _suppress_stdout_stderr():
-        workbook = xlrd.open_workbook(filepath, on_demand=True, logfile=io.StringIO())
+    workbook = xlrd.open_workbook(filepath, on_demand=True, logfile=io.StringIO())
 
     try:
         for sheet in workbook.sheets():
@@ -577,22 +551,21 @@ def _extract_doc(filepath: str) -> list[tuple[str, str]]:
 
     items: list[tuple[str, str]] = []
 
-    with _suppress_stdout_stderr():
-        with olefile.OleFileIO(filepath) as ole:
-            if not ole.exists("WordDocument"):
-                return []
+    with olefile.OleFileIO(filepath) as ole:
+        if not ole.exists("WordDocument"):
+            return []
 
-            try:
-                raw = ole.openstream("WordDocument").read()
-            except OSError:
-                return []
+        try:
+            raw = ole.openstream("WordDocument").read()
+        except OSError:
+            return []
 
-            if len(raw) > BINARY_FALLBACK_MAX_BYTES:
-                raw = raw[:BINARY_FALLBACK_MAX_BYTES]
+        if len(raw) > BINARY_FALLBACK_MAX_BYTES:
+            raw = raw[:BINARY_FALLBACK_MAX_BYTES]
 
-            candidates = _extract_doc_text_candidates(raw)
-            for line_no, text in enumerate(candidates, start=1):
-                items.append((f"DOC L{line_no}", text))
+        candidates = _extract_doc_text_candidates(raw)
+        for line_no, text in enumerate(candidates, start=1):
+            items.append((f"DOC L{line_no}", text))
 
     return items
 
@@ -600,11 +573,10 @@ def _extract_doc(filepath: str) -> list[tuple[str, str]]:
 def _extract_hwp(filepath: str) -> list[tuple[str, str]]:
     if olefile is not None:
         try:
-            with _suppress_stdout_stderr():
-                if olefile.isOleFile(filepath):
-                    items = _extract_hwp_ole(filepath)
-                    if items:
-                        return items
+            if olefile.isOleFile(filepath):
+                items = _extract_hwp_ole(filepath)
+                if items:
+                    return items
         except Exception:
             pass
 
@@ -634,26 +606,25 @@ def _extract_hwp(filepath: str) -> list[tuple[str, str]]:
 def _extract_hwp_ole(filepath: str) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
 
-    with _suppress_stdout_stderr():
-        with olefile.OleFileIO(filepath) as ole:
-            compressed = _is_hwp_compressed(ole)
-            streams = _iter_hwp_section_streams(ole)
+    with olefile.OleFileIO(filepath) as ole:
+        compressed = _is_hwp_compressed(ole)
+        streams = _iter_hwp_section_streams(ole)
 
-            line_no = 1
-            for stream_name in streams:
-                try:
-                    raw = ole.openstream(stream_name).read()
-                except OSError:
-                    continue
+        line_no = 1
+        for stream_name in streams:
+            try:
+                raw = ole.openstream(stream_name).read()
+            except OSError:
+                continue
 
-                decompressed = _decompress_hwp_stream(raw, compressed)
-                if not decompressed:
-                    continue
+            decompressed = _decompress_hwp_stream(raw, compressed)
+            if not decompressed:
+                continue
 
-                paragraphs = _parse_hwp_para_text(decompressed)
-                for text in paragraphs:
-                    items.append((f"L{line_no}", text))
-                    line_no += 1
+            paragraphs = _parse_hwp_para_text(decompressed)
+            for text in paragraphs:
+                items.append((f"L{line_no}", text))
+                line_no += 1
 
     return items
 
