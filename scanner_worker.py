@@ -108,7 +108,16 @@ def _search_content(
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
 
-            for future in as_completed(future_to_file, timeout=0.5):
+            # as_completed timeout 예외 처리
+            done_futures = []
+            try:
+                for future in as_completed(future_to_file, timeout=1.0):
+                    done_futures.append(future)
+                    break  # 1개씩 처리 후 stop 체크
+            except TimeoutError:
+                continue  # 아직 완료된 게 없으면 다시 루프
+
+            for future in done_futures:
                 fp = future_to_file.pop(future)
                 completed += 1
 
@@ -145,8 +154,6 @@ def _search_content(
 
                 if completed % 100 == 0 or completed == total:
                     _send(conn, MSG_PROGRESS, done=completed, total=total)
-
-                break  # as_completed에서 1개만 처리 후 stop 체크
 
 
 def _send(conn: Connection, msg_type: str, **data: Any) -> None:

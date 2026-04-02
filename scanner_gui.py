@@ -273,6 +273,14 @@ class FileScannerApp(ctk.CTk):
             style="R.Treeview",
         )
         self.tree.grid(row=0, column=0, sticky="nsew")
+        # ── 검색 진행 오버레이 (순수 tk.Label) ──
+        self._overlay = tk.Label(
+            tf, text="", font=("맑은 고딕", 18, "bold"),
+            fg="#374151", bg="#ffffff",
+            padx=30, pady=20, relief="solid", bd=1,
+        )
+        self._search_start: float = 0.0
+
 
         cols = [
             ("keyword", "키워드", 80, False, self._show_kw_filter),
@@ -444,6 +452,10 @@ class FileScannerApp(ctk.CTk):
         self._clear_tree()
         self._set_summary("검색 시작")
         self._set_progress(0, 0)
+        self._search_start = time.time()
+        self._overlay.configure(text="파일 목록 수집 중...")
+        self._overlay.place(relx=0.5, rely=0.4, anchor="center")
+        self._overlay.lift()
         self.search_btn.configure(text="검색 중지")
         self.save_btn.configure(state="disabled")
 
@@ -532,6 +544,8 @@ class FileScannerApp(ctk.CTk):
 
     def _finish_search(self) -> None:
         self._is_searching = False
+        if self._overlay.winfo_ismapped():
+            self._overlay.place_forget()
         if self._conn:
             try:
                 self._conn.close()
@@ -581,13 +595,31 @@ class FileScannerApp(ctk.CTk):
         if total <= 0:
             self.prog_bar.set(0)
             self.prog_lbl.configure(text="진행: 0%")
-        else:
-            r = min(1.0, done / total)
-            self.prog_bar.set(r)
-            self.prog_lbl.configure(
-                text=f"진행: {int(r * 100)}% ({done:,}/{total:,}파일)"
-            )
+            return
 
+        r = min(1.0, done / total)
+        pct = int(r * 100)
+        self.prog_bar.set(r)
+        self.prog_lbl.configure(
+            text=f"진행: {pct}% ({done:,}/{total:,}파일)"
+        )
+
+        elapsed = time.time() - self._search_start
+        if done > 0 and r < 1.0:
+            remaining = (elapsed / done) * (total - done)
+            if remaining >= 60:
+                m, s = int(remaining // 60), int(remaining % 60)
+                eta = f"약 {m}분 {s}초 남음"
+            else:
+                eta = f"약 {int(remaining)}초 남음"
+            self._overlay.configure(text=f"검색 중... {pct}%\n{eta}")
+            if not self._overlay.winfo_ismapped():
+                self._overlay.place(relx=0.5, rely=0.4, anchor="center")
+                self._overlay.lift()
+        elif r >= 1.0:
+            if self._overlay.winfo_ismapped():
+                self._overlay.place_forget()
+                
     def _set_summary(self, text: str) -> None:
         self._base_summary = text
         self._refresh_summary()
