@@ -82,10 +82,11 @@ TXT_FALLBACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "mbcs")
 QUICK_CHECK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp949", "euc-kr", "utf-16-le")
 QUICK_CHECK_MAX_BYTES: int = 100 * 1024 * 1024
 
-# DOC/HWP 바이너리 폴백 시 읽어들일 최대 바이트 수
 BINARY_FALLBACK_MAX_BYTES: int = 10 * 1024 * 1024
+MAX_EXTRACT_FILE_SIZE: int = 50 * 1024 * 1024
+MAX_PDF_PAGES: int = 500
+FILE_PROCESS_TIMEOUT: int = 30
 
-# ThreadPoolExecutor 워커 수
 MIN_WORKERS: int = 2
 MAX_WORKERS: int = 8
 CPU_DIVISOR: int = 2
@@ -389,7 +390,7 @@ def consume_search_file_meta(filepath: str) -> dict[str, bool]:
 
 
 def clear_all_search_file_meta() -> None:
-    """내부 메타 저장소를 완전히 비운다 (검색 종료/중단 시 호출)."""
+    """내부 메타 저장소를 완전히 비운다."""
     with _SEARCH_FILE_META_LOCK:
         _SEARCH_FILE_META.clear()
 
@@ -434,6 +435,14 @@ def save_report(results: list[dict[str, Any]], output_path: str) -> None:
 # ──────────────────────────────────────────────
 
 def _extract_text_with_status(filepath: str) -> tuple[list[tuple[str, str]], bool]:
+    # 대용량 파일 사전 차단
+    try:
+        file_size = os.path.getsize(filepath)
+        if file_size > MAX_EXTRACT_FILE_SIZE:
+            return [], True
+    except OSError:
+        return [], True
+
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
 
@@ -465,7 +474,9 @@ def _extract_pdf(filepath: str) -> list[tuple[str, str]]:
     if fitz is not None:
         try:
             with fitz.open(filepath) as document:
-                for page_num, page in enumerate(document, start=1):
+                page_count = min(len(document), MAX_PDF_PAGES)
+                for page_num in range(1, page_count + 1):
+                    page = document[page_num - 1]
                     raw_text = page.get_text("text") or ""
                     for line_num, line in enumerate(raw_text.splitlines(), start=1):
                         cleaned = line.strip()
@@ -479,7 +490,9 @@ def _extract_pdf(filepath: str) -> list[tuple[str, str]]:
         raise RuntimeError("PDF 추출 라이브러리(fitz/pdfplumber) 없음")
 
     with pdfplumber.open(filepath) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
+        page_count = min(len(pdf.pages), MAX_PDF_PAGES)
+        for page_num in range(1, page_count + 1):
+            page = pdf.pages[page_num - 1]
             raw_text = page.extract_text() or ""
             for line_num, line in enumerate(raw_text.splitlines(), start=1):
                 cleaned = line.strip()
@@ -513,7 +526,7 @@ def _extract_xlsx(filepath: str) -> list[tuple[str, str]]:
 
 
 def _extract_xls(filepath: str) -> list[tuple[str, str]]:
-    """xls 파일 텍스트 추출. xlrd 의 콘솔 경고를 완전히 억제한다."""
+    """xls 파일 텍스트 추출."""
     if xlrd is None:
         raise RuntimeError("xlrd 미설치")
 
@@ -574,7 +587,6 @@ def _extract_doc(filepath: str) -> list[tuple[str, str]]:
             except OSError:
                 return []
 
-            # 대용량 바이너리 폴백 제한
             if len(raw) > BINARY_FALLBACK_MAX_BYTES:
                 raw = raw[:BINARY_FALLBACK_MAX_BYTES]
 
